@@ -46,6 +46,7 @@ sub parse_email {
   my $attachments = [];
   parseStructure([$bodystructure], 'mixed', 0, $textBody, $htmlBody, $attachments);
 
+  my ($hasAtt) = grep { ($_->{disposition} // '') ne 'inline' } @$attachments;
   my $data = {
     id => $id,
     to => asAddresses($eml->header('To')),
@@ -59,7 +60,7 @@ sub parse_email {
     references => asMessageIds($eml->header('References')),
     inReplyTo => asMessageIds($eml->header('In-Reply-To')),
     preview => $preview,
-    hasAttachment => scalar(@$attachments) ? $JSON::true : $JSON::false,
+    hasAttachment => $hasAtt ? $JSON::true : $JSON::false,
     headers => $headers,
     bodyStructure => $bodystructure,
     bodyValues => \%values,
