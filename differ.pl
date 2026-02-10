@@ -94,6 +94,8 @@ sub valeq {
   if (defined $x and defined $y) {
     $x =~ s/^\s// if $x =~ m/^\s/;
     $y =~ s/^\s// if $y =~ m/^\s/;
+    $x =~ s/\s$// if $x =~ m/\s$/;
+    $y =~ s/\s$// if $y =~ m/\s$/;
   }
 
   my $xe = $j->encode([$x]);

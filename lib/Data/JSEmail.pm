@@ -125,7 +125,7 @@ sub bodystructure {
       blobId => "m-$id-$partno",
       type => "$type->{type}/$type->{subtype}",
       size => length($body),
-      name => $disposition->{attributes}{filename},
+      name => $disposition->{attributes}{filename} // $type->{attributes}{name},
       cid => asOneURL($eml->header('Content-Id')),
       charset => $charset,
       language => asCommaList($eml->header('Content-Language')),
