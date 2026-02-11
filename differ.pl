@@ -49,6 +49,9 @@ for my $file (sort @files) {
     }
     valeq("$file $key", $x, $y);
   }
+  if ($emailid) {
+    say Data::JSEmail::make($e);
+  }
 #  last;
 }
 
@@ -77,7 +80,7 @@ sub valeq {
       return;
     }
     my %all = (%$x, %$y);
-    for my $key (keys %all) {
+    for my $key (sort keys %all) {
       next if $key eq 'blobId'; # skippable keys
       next if $key eq 'size'; # charset magic XXX
       my $vx = $x->{$key};
