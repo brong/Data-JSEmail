@@ -14,6 +14,7 @@ use Email::MIME::ContentType;
 use Email::MIME::Header::AddressList;
 use Encode;
 use Encode::MIME::Header;
+use Date::Format;
 use DateTime;
 use DateTime::Format::Mail;
 use DateTime::Format::ISO8601::Format;
@@ -97,7 +98,7 @@ sub bodystructure {
       type => "$type->{type}/$type->{subtype}",
       size => 0,
       name => undef,
-      cid => undef,
+      cid => asOneURL($eml->header('Content-Id')),
       charset => $type->{attributes}{charset},
       language => asCommaList($eml->header('Content-Language')),
       location => undef,
@@ -109,7 +110,7 @@ sub bodystructure {
     my $disposition = {};
     if (my $val = $eml->header('Content-Disposition')) {
       my $orig = $val;
-      $val =~ s{^(.*filename=)([^"][^;]+)}{$1"$2"};
+      $val =~ s{^(.*filename=\s*)([^\s"][^;]+)}{$1"$2"};
       $disposition = parse_content_disposition($val);
     }
     $partno ||= '1';
@@ -169,6 +170,13 @@ sub asCommaList {
 sub asURLs {
   my $val = shift;
   return undef unless defined $val;
+  unless ($val =~ m/\<.*\>/) {
+    $val =~ s/^\s+//;
+    $val =~ s/ .*//; # strip everything after first whitespace
+    return undef unless length($val);
+    return [$val];
+  }
+
   my @list;
   while ($val =~ m/<([^>]+)>/gs) {
     push @list, $1;
@@ -193,6 +201,16 @@ sub asText {
 }
 
 sub asAddresses {
+  my $emails = shift;
+
+  my $res = asGroupAddresses($emails);
+  return undef unless $res;
+
+  my $arr = [ grep { defined $_->{email} } @$res ];
+  return $arr;
+}
+
+sub asGroupAddresses {
   my $emails = shift;
 
   return undef unless defined $emails;
@@ -428,7 +446,7 @@ sub make {
     Bcc => _mkemail($args->{bcc}),
     Subject => $args->{subject},
     Date => Date::Format::time2str("%a, %d %b %Y %H:%M:%S %z", $args->{msgdate}),
-    %{$args->{headers} || {}},
+    #%{$args->{headers} || {}},
   ];
   if ($args->{replyTo}) {
     $header->{'Reply-To'} = _mkemail($args->{replyTo});
