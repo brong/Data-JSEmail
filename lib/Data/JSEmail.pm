@@ -8,13 +8,14 @@ package Data::JSEmail;
 use JSON;
 use JSON::XS;
 use HTML::Strip;
-use Image::Size;
 use Email::MIME;
 use Email::MIME::ContentType;
 use Email::MIME::Header::AddressList;
 use Encode;
 use Encode::MIME::Header;
+use Unicode::Normalize;
 use Date::Format;
+use Date::Parse;
 use DateTime;
 use DateTime::Format::Mail;
 use DateTime::Format::ISO8601::Format;
@@ -50,6 +51,7 @@ sub parse_email {
   my ($hasAtt) = grep { ($_->{disposition} // '') ne 'inline' } @$attachments;
   my $data = {
     id => $id,
+    sender => asAddresses($eml->header('Sender')),
     to => asAddresses($eml->header('To')),
     cc => asAddresses($eml->header('Cc')),
     bcc => asAddresses($eml->header('Bcc')),
@@ -97,6 +99,7 @@ sub bodystructure {
       blobId => undef,
       type => "$type->{type}/$type->{subtype}",
       size => 0,
+      headers => headers($eml),
       name => undef,
       cid => asOneURL($eml->header('Content-Id')),
       charset => $type->{attributes}{charset},
@@ -115,8 +118,12 @@ sub bodystructure {
     }
     $partno ||= '1';
     my $body = $eml->body();
-    if ($type) {
-      $values->{$partno}{value} = $body;
+    if ($type->{type} eq 'text') {
+      $values->{$partno} = {
+        value => $body,
+        isEncodingProblem => $JSON::false,
+        isTruncated => $JSON::false,
+      };
     }
     my $charset = $type->{attributes}{charset};
     if ($type->{type} eq 'text' and not $charset) {
@@ -127,6 +134,7 @@ sub bodystructure {
       blobId => "m-$id-$partno",
       type => "$type->{type}/$type->{subtype}",
       size => length($body),
+      headers => headers($eml),
       name => $disposition->{attributes}{filename} // $type->{attributes}{name},
       cid => asOneURL($eml->header('Content-Id')),
       charset => $charset,
@@ -137,11 +145,12 @@ sub bodystructure {
   }
 }
 
-# XXX - UTCDate, or?  Maybe need timezone support
 sub asDate {
   my $val = shift;
+  return undef unless defined $val;
   $val =~ s/\(.*//;
-  my $dt = DateTime::Format::Mail->parse_datetime($val);
+  my $dt = eval { DateTime::Format::Mail->parse_datetime($val) };
+  return undef unless $dt;
   my $tz = $dt->time_zone;
   if ($tz->isa('DateTime::TimeZone::Floating')) {
     $dt->set_time_zone('UTC');
@@ -153,7 +162,7 @@ sub asMessageIds {
   my $val = shift;
   return undef unless $val;
   my @list = $val =~ m{<([^\>]+)>}gs;
-  return [$val] unless @list;
+  return undef unless @list;
   return \@list;
 }
 
@@ -190,11 +199,10 @@ sub asOneURL {
   return $list->[-1];
 }
 
-# XXX - more cleaning?
 sub asText {
   my $val = shift;
   return undef unless defined $val;
-  my $res = encode_utf8(decode('MIME-Header', $val));
+  my $res = encode_utf8(NFC(decode('MIME-Header', $val)));
   $res =~ s/^\s*//;
   $res =~ s/\s*$//;
   return $res;
@@ -263,9 +271,6 @@ sub headers {
 
 sub _clean {
   my ($type, $text) = @_;
-  #if ($type =~ m/;\s*charset\s*=\s*([^;]+)/) {
-    #$text = Encode::decode($1, $text);
-  #}
   return $text;
 }
 
@@ -391,7 +396,7 @@ sub _detect_encoding {
   my $type = shift;
 
   if ($type =~ m/^message/) {
-    if ($content =~ m/[^\x{20}-\x{7f}]/) {
+    if ($content =~ m/[^\x{09}\x{0a}\x{0d}\x{20}-\x{7e}]/) {
       return '8bit';
     }
     return '7bit';
@@ -399,7 +404,7 @@ sub _detect_encoding {
 
   if ($type =~ m/^text/) {
     # XXX - also line lengths?
-    if ($content =~ m/[^\x{20}-\x{7f}]/) {
+    if ($content =~ m/[^\x{09}\x{0a}\x{0d}\x{20}-\x{7e}]/) {
       return 'quoted-printable';
     }
     return '7bit';
@@ -439,17 +444,25 @@ sub make {
   my $args = shift;
   my $getblob = shift;
 
-  my $header = [
+  my @header = (
     From => _mkemail($args->{from}),
     To => _mkemail($args->{to}),
     Cc => _mkemail($args->{cc}),
     Bcc => _mkemail($args->{bcc}),
     Subject => $args->{subject},
     Date => Date::Format::time2str("%a, %d %b %Y %H:%M:%S %z", $args->{msgdate}),
-    #%{$args->{headers} || {}},
-  ];
+  );
+  if ($args->{messageId} && @{$args->{messageId}}) {
+    push @header, 'Message-ID' => '<' . $args->{messageId}[0] . '>';
+  }
+  if ($args->{inReplyTo} && @{$args->{inReplyTo}}) {
+    push @header, 'In-Reply-To' => join(' ', map { "<$_>" } @{$args->{inReplyTo}});
+  }
+  if ($args->{references} && @{$args->{references}}) {
+    push @header, 'References' => join(' ', map { "<$_>" } @{$args->{references}});
+  }
   if ($args->{replyTo}) {
-    $header->{'Reply-To'} = _mkemail($args->{replyTo});
+    push @header, 'Reply-To' => _mkemail($args->{replyTo});
   }
 
   # massive switch
@@ -485,16 +498,14 @@ sub make {
         },
         parts => [$textpart, $htmlpart],
       );
-      # XXX - attachments
       $MIME = Email::MIME->create(
-        header_str => [@$header, 'Content-Type' => 'multipart/mixed'],
+        header_str => [@header, 'Content-Type' => 'multipart/mixed'],
         parts => [$msgparts, @attparts],
       );
     }
     else {
-      # XXX - attachments
       $MIME = Email::MIME->create(
-        header_str => [@$header, 'Content-Type' => 'multipart/mixed'],
+        header_str => [@header, 'Content-Type' => 'multipart/mixed'],
         parts => [$textpart, @attparts],
       );
     }
@@ -505,7 +516,7 @@ sub make {
         attributes => {
           content_type => 'multipart/alternative',
         },
-        header_str => $header,
+        header_str => \@header,
         parts => [$textpart, $htmlpart],
       );
     }
@@ -515,7 +526,7 @@ sub make {
           content_type => 'text/plain',
           charset => 'UTF-8',
         },
-        header_str => $header,
+        header_str => \@header,
         body => $args->{textBody},
       );
     }
