@@ -1,6 +1,6 @@
 Revision history for Perl extension Data::JSEmail
 
-0.02  2026-04-05
+0.01  2026-04-05
 	- Review and fix against RFC 8621
 	- Fix bodyValues to only store text/* parts
 	- Fix make() Reply-To crash (array ref used as hash ref)
@@ -14,6 +14,3 @@ Revision history for Perl extension Data::JSEmail
 	- Fix _detect_encoding to allow tab/LF/CR as valid 7bit
 	- Remove unused Image::Size import
 	- Add Cyrus JMAP integration tests
-
-0.01  2026-03-27
-	- original release
