@@ -5,6 +5,8 @@ use warnings;
 
 package Data::JSEmail;
 
+our $VERSION = '0.02';
+
 use JSON;
 use JSON::XS;
 use HTML::Strip;
