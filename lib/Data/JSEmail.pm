@@ -534,9 +534,7 @@ sub make {
     push @header, Date => Date::Format::time2str("%a, %d %b %Y %H:%M:%S %z", time());
   }
 
-  if ($args->{messageId} && ref($args->{messageId}) eq 'ARRAY' && @{$args->{messageId}}) {
-    push @header, 'Message-ID' => join(' ', map { "<$_>" } @{$args->{messageId}});
-  }
+  # messageId handled after header:* extraction (see below)
   if ($args->{inReplyTo} && ref($args->{inReplyTo}) eq 'ARRAY' && @{$args->{inReplyTo}}) {
     push @header, 'In-Reply-To' => join(' ', map { "<$_>" } @{$args->{inReplyTo}});
   }
@@ -572,6 +570,15 @@ sub make {
         }
       }
     }
+  }
+
+  # Message-ID: set from args, or leave what header:* provided, or generate default
+  my $has_msgid = grep { lc($_) eq 'message-id' } map { $header[$_] } grep { $_ % 2 == 0 } 0..$#header;
+  if (!$has_msgid) {
+    if ($args->{messageId} && ref($args->{messageId}) eq 'ARRAY' && @{$args->{messageId}}) {
+      push @header, 'Message-ID' => join(' ', map { "<$_>" } @{$args->{messageId}});
+    }
+    # else: Email::MIME will generate one, or caller should set msgdate-based default
   }
 
   # Extract body content from bodyValues via textBody/htmlBody part references
