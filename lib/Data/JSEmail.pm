@@ -422,11 +422,13 @@ sub parseStructure {
 
 sub _mkone {
   my $h = shift;
-  if ($h->{name} ne '') {
-    return "\"$h->{name}\" <$h->{email}>";
+  my $email = $h->{email};
+  my $name = $h->{name};
+  if (defined $name && $name ne '') {
+    return qq{"$name" <$email>};
   }
   else {
-    return "$h->{email}";
+    return $email;
   }
 }
 
