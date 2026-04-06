@@ -121,8 +121,10 @@ sub bodystructure {
     $partno ||= '1';
     my $body = $eml->body();
     if ($type->{type} eq 'text') {
+      # RFC 8621: line endings MUST be \n not \r\n
+      (my $normalized = $body) =~ s/\r\n/\n/g;
       $values->{$partno} = {
-        value => $body,
+        value => $normalized,
         isEncodingProblem => $JSON::false,
         isTruncated => $JSON::false,
       };
