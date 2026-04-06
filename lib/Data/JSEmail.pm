@@ -459,6 +459,16 @@ sub _detect_encoding {
   return 'base64';
 }
 
+sub _valid_cid {
+  my $cid = shift;
+  return 1 unless defined $cid;
+  # Content-ID msg-id: no angle brackets, no whitespace, no NUL
+  die "Invalid cid: must not contain < or >\n" if $cid =~ /[<>]/;
+  die "Invalid cid: must not contain whitespace\n" if $cid =~ /\s/;
+  die "Invalid cid: must not be empty\n" if $cid eq '';
+  return 1;
+}
+
 sub _makeatt {
   my $att = shift;
   my $getblob = shift;
@@ -483,6 +493,7 @@ sub _makeatt {
   );
 
   if ($att->{cid}) {
+    _valid_cid($att->{cid});
     $part->header_str_set('Content-ID' => "<$att->{cid}>");
   }
   if ($att->{language} && ref($att->{language}) eq 'ARRAY') {
@@ -626,6 +637,7 @@ sub make {
       body => $charset eq 'UTF-8' ? Encode::encode_utf8($textContent) : $textContent,
     );
     if ($textMeta{cid}) {
+      _valid_cid($textMeta{cid});
       $textpart->header_str_set('Content-ID' => "<$textMeta{cid}>");
     }
     if ($textMeta{language} && ref($textMeta{language}) eq 'ARRAY') {
@@ -644,6 +656,7 @@ sub make {
       body => $charset eq 'UTF-8' ? Encode::encode_utf8($htmlContent) : $htmlContent,
     );
     if ($htmlMeta{cid}) {
+      _valid_cid($htmlMeta{cid});
       $htmlpart->header_str_set('Content-ID' => "<$htmlMeta{cid}>");
     }
     if ($htmlMeta{language} && ref($htmlMeta{language}) eq 'ARRAY') {
@@ -666,7 +679,10 @@ sub make {
         $attrs{name} = $att->{name} if $att->{name};
         $attrs{encoding} = _detect_encoding($content, $attrs{content_type});
         my $part = Email::MIME->create(attributes => \%attrs, body => $content);
-        $part->header_str_set('Content-ID' => "<$att->{cid}>") if $att->{cid};
+        if ($att->{cid}) {
+          _valid_cid($att->{cid});
+          $part->header_str_set('Content-ID' => "<$att->{cid}>");
+        }
         $part->header_str_set('Content-Language' => join(', ', @{$att->{language}}))
           if $att->{language} && ref($att->{language}) eq 'ARRAY';
         push @attparts, $part;
