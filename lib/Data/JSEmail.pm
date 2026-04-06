@@ -121,11 +121,19 @@ sub bodystructure {
     $partno ||= '1';
     my $body = $eml->body();
     if ($type->{type} eq 'text') {
+      # Decode charset to Perl character string
+      my $decoded = eval { $eml->body_str() };
+      if (defined $decoded) {
+        $body = $decoded;
+      } else {
+        # Fallback: try UTF-8 decode
+        $body = eval { Encode::decode('UTF-8', $body) } // $body;
+      }
       # RFC 8621: line endings MUST be \n not \r\n
-      (my $normalized = $body) =~ s/\r\n/\n/g;
+      $body =~ s/\r\n/\n/g;
       $values->{$partno} = {
-        value => $normalized,
-        isEncodingProblem => $JSON::false,
+        value => $body,
+        isEncodingProblem => (defined $decoded ? $JSON::false : $JSON::true),
         isTruncated => $JSON::false,
       };
     }
