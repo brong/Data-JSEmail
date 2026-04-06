@@ -488,92 +488,166 @@ sub make {
   my $args = shift;
   my $getblob = shift;
 
-  my @header = (
-    From => _mkemail($args->{from}),
-    To => _mkemail($args->{to}),
-    Cc => _mkemail($args->{cc}),
-    Bcc => _mkemail($args->{bcc}),
-    Subject => $args->{subject},
-    Date => Date::Format::time2str("%a, %d %b %Y %H:%M:%S %z", $args->{msgdate}),
-  );
-  if ($args->{messageId} && @{$args->{messageId}}) {
-    push @header, 'Message-ID' => '<' . $args->{messageId}[0] . '>';
+  # RFC 8621 Email/set create format:
+  #   from, to, cc, bcc, replyTo, sender: EmailAddress[]
+  #   subject: String
+  #   sentAt: Date (optional)
+  #   messageId, inReplyTo, references: String[]
+  #   textBody: EmailBodyPart[] (each with partId referencing bodyValues)
+  #   htmlBody: EmailBodyPart[] (each with partId referencing bodyValues)
+  #   bodyValues: Id[EmailBodyValue] (partId => {value: String})
+  #   attachments: EmailBodyPart[] (each with blobId)
+
+  my @header;
+  push @header, From => _mkemail($args->{from}) if $args->{from};
+  push @header, To => _mkemail($args->{to}) if $args->{to};
+  push @header, Cc => _mkemail($args->{cc}) if $args->{cc};
+  push @header, Bcc => _mkemail($args->{bcc}) if $args->{bcc};
+  push @header, Subject => $args->{subject} if defined $args->{subject};
+
+  if ($args->{sentAt}) {
+    push @header, Date => $args->{sentAt};
   }
-  if ($args->{inReplyTo} && @{$args->{inReplyTo}}) {
+  elsif ($args->{msgdate}) {
+    push @header, Date => Date::Format::time2str("%a, %d %b %Y %H:%M:%S %z", $args->{msgdate});
+  }
+  else {
+    push @header, Date => Date::Format::time2str("%a, %d %b %Y %H:%M:%S %z", time());
+  }
+
+  if ($args->{messageId} && ref($args->{messageId}) eq 'ARRAY' && @{$args->{messageId}}) {
+    push @header, 'Message-ID' => join(' ', map { "<$_>" } @{$args->{messageId}});
+  }
+  if ($args->{inReplyTo} && ref($args->{inReplyTo}) eq 'ARRAY' && @{$args->{inReplyTo}}) {
     push @header, 'In-Reply-To' => join(' ', map { "<$_>" } @{$args->{inReplyTo}});
   }
-  if ($args->{references} && @{$args->{references}}) {
+  if ($args->{references} && ref($args->{references}) eq 'ARRAY' && @{$args->{references}}) {
     push @header, 'References' => join(' ', map { "<$_>" } @{$args->{references}});
   }
   if ($args->{replyTo}) {
     push @header, 'Reply-To' => _mkemail($args->{replyTo});
   }
+  if ($args->{sender}) {
+    push @header, Sender => _mkemail($args->{sender});
+  }
 
-  # massive switch
+  # Extract body content from bodyValues via textBody/htmlBody part references
+  my $bodyValues = $args->{bodyValues} || {};
+
+  my $textContent;
+  my $htmlContent;
+
+  if ($args->{textBody} && ref($args->{textBody}) eq 'ARRAY') {
+    for my $part (@{$args->{textBody}}) {
+      my $partId = $part->{partId};
+      if ($partId && $bodyValues->{$partId}) {
+        $textContent = $bodyValues->{$partId}{value};
+        last;
+      }
+      # blobId reference
+      if ($part->{blobId} && $getblob) {
+        my ($type, $content) = $getblob->($part->{blobId});
+        $textContent = $content;
+        last;
+      }
+    }
+  }
+
+  if ($args->{htmlBody} && ref($args->{htmlBody}) eq 'ARRAY') {
+    for my $part (@{$args->{htmlBody}}) {
+      my $partId = $part->{partId};
+      if ($partId && $bodyValues->{$partId}) {
+        $htmlContent = $bodyValues->{$partId}{value};
+        last;
+      }
+      if ($part->{blobId} && $getblob) {
+        my ($type, $content) = $getblob->($part->{blobId});
+        $htmlContent = $content;
+        last;
+      }
+    }
+  }
+
+  # Fallback: generate text from HTML if no text provided
+  if (!defined $textContent && defined $htmlContent) {
+    $textContent = htmltotext($htmlContent);
+  }
+
+  # Build MIME parts
   my $MIME;
+  my $textpart;
   my $htmlpart;
-  my $text = $args->{textBody} ? $args->{textBody} : htmltotext($args->{htmlBody});
-  my $textpart = Email::MIME->create(
-    attributes => {
-      content_type => 'text/plain',
-      charset => 'UTF-8',
-    },
-    body => Encode::encode_utf8($text),
-  );
-  if ($args->{htmlBody}) {
+
+  if (defined $textContent) {
+    $textpart = Email::MIME->create(
+      attributes => {
+        content_type => 'text/plain',
+        charset => 'UTF-8',
+      },
+      body => Encode::encode_utf8($textContent),
+    );
+  }
+
+  if (defined $htmlContent) {
     $htmlpart = Email::MIME->create(
       attributes => {
         content_type => 'text/html',
         charset => 'UTF-8',
       },
-      body => Encode::encode_utf8($args->{htmlBody}),
+      body => Encode::encode_utf8($htmlContent),
     );
   }
 
-  my @attachments = $args->{attachments} ? @{$args->{attachments}} : ();
+  my @attparts;
+  if ($args->{attachments} && ref($args->{attachments}) eq 'ARRAY') {
+    @attparts = map { _makeatt($_, $getblob) } @{$args->{attachments}};
+  }
 
-  if (@attachments) {
-    my @attparts = map { _makeatt($_, $getblob) } @attachments;
-    # most complex case
-    if ($htmlpart) {
-      my $msgparts = Email::MIME->create(
-        attributes => {
-          content_type => 'multipart/alternative'
-        },
+  # Assemble the MIME structure
+  if (@attparts) {
+    my $body;
+    if ($textpart && $htmlpart) {
+      $body = Email::MIME->create(
+        attributes => { content_type => 'multipart/alternative' },
         parts => [$textpart, $htmlpart],
-      );
-      $MIME = Email::MIME->create(
-        header_str => [@header, 'Content-Type' => 'multipart/mixed'],
-        parts => [$msgparts, @attparts],
       );
     }
     else {
-      $MIME = Email::MIME->create(
-        header_str => [@header, 'Content-Type' => 'multipart/mixed'],
-        parts => [$textpart, @attparts],
-      );
+      $body = $textpart || $htmlpart;
     }
+    $MIME = Email::MIME->create(
+      header_str => [@header, 'Content-Type' => 'multipart/mixed'],
+      parts => [$body, @attparts],
+    );
+  }
+  elsif ($textpart && $htmlpart) {
+    $MIME = Email::MIME->create(
+      attributes => { content_type => 'multipart/alternative' },
+      header_str => \@header,
+      parts => [$textpart, $htmlpart],
+    );
+  }
+  elsif ($textpart) {
+    $MIME = Email::MIME->create(
+      attributes => { content_type => 'text/plain', charset => 'UTF-8' },
+      header_str => \@header,
+      body => Encode::encode_utf8($textContent),
+    );
+  }
+  elsif ($htmlpart) {
+    $MIME = Email::MIME->create(
+      attributes => { content_type => 'text/html', charset => 'UTF-8' },
+      header_str => \@header,
+      body => Encode::encode_utf8($htmlContent),
+    );
   }
   else {
-    if ($htmlpart) {
-      $MIME = Email::MIME->create(
-        attributes => {
-          content_type => 'multipart/alternative',
-        },
-        header_str => \@header,
-        parts => [$textpart, $htmlpart],
-      );
-    }
-    else {
-      $MIME = Email::MIME->create(
-        attributes => {
-          content_type => 'text/plain',
-          charset => 'UTF-8',
-        },
-        header_str => \@header,
-        body => $args->{textBody},
-      );
-    }
+    # Empty message
+    $MIME = Email::MIME->create(
+      attributes => { content_type => 'text/plain', charset => 'UTF-8' },
+      header_str => \@header,
+      body => '',
+    );
   }
 
   my $res = $MIME->as_string();
