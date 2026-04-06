@@ -539,7 +539,15 @@ sub make {
     push @header, Sender => _mkemail($args->{sender});
   }
 
-  # Extract header:* overrides from body parts (RFC 8621 Email/set)
+  # Extract header:* overrides from top-level and body parts (RFC 8621 Email/set)
+  for my $key (keys %$args) {
+    next unless $key =~ /^header:(.+)/;
+    my $hname = $1;
+    my $hval = $args->{$key};
+    unless (grep { lc($_) eq lc($hname) } map { $header[$_] } grep { $_ % 2 == 0 } 0..$#header) {
+      push @header, $hname => $hval;
+    }
+  }
   for my $partlist ($args->{textBody}, $args->{htmlBody}) {
     next unless $partlist && ref($partlist) eq 'ARRAY';
     for my $part (@$partlist) {
@@ -645,7 +653,28 @@ sub make {
 
   my @attparts;
   if ($args->{attachments} && ref($args->{attachments}) eq 'ARRAY') {
-    @attparts = map { _makeatt($_, $getblob) } @{$args->{attachments}};
+    for my $att (@{$args->{attachments}}) {
+      if ($att->{partId} && $bodyValues->{$att->{partId}}) {
+        # Content from bodyValues
+        my $content = $bodyValues->{$att->{partId}}{value} // '';
+        my $disp = $att->{disposition} || 'attachment';
+        my %attrs = (
+          content_type => $att->{type} || 'application/octet-stream',
+          disposition => $disp,
+        );
+        $attrs{filename} = $att->{name} if $att->{name};
+        $attrs{name} = $att->{name} if $att->{name};
+        $attrs{encoding} = _detect_encoding($content, $attrs{content_type});
+        my $part = Email::MIME->create(attributes => \%attrs, body => $content);
+        $part->header_str_set('Content-ID' => "<$att->{cid}>") if $att->{cid};
+        $part->header_str_set('Content-Language' => join(', ', @{$att->{language}}))
+          if $att->{language} && ref($att->{language}) eq 'ARRAY';
+        push @attparts, $part;
+      }
+      elsif ($att->{blobId} && $getblob) {
+        push @attparts, _makeatt($att, $getblob);
+      }
+    }
   }
 
   # Assemble the MIME structure
