@@ -597,22 +597,27 @@ sub make {
   my $htmlpart;
 
   if (defined $textContent) {
+    # Use us-ascii charset if content is pure 7-bit ASCII, UTF-8 otherwise.
+    # Note: the JMAP test suite (text-body.t) is strict about expecting
+    # us-ascii for plain ASCII content, even though UTF-8 is valid.
+    my $charset = ($textContent =~ /[^\x{00}-\x{7f}]/) ? 'UTF-8' : 'us-ascii';
     $textpart = Email::MIME->create(
       attributes => {
         content_type => 'text/plain',
-        charset => 'UTF-8',
+        charset => $charset,
       },
-      body => Encode::encode_utf8($textContent),
+      body => $charset eq 'UTF-8' ? Encode::encode_utf8($textContent) : $textContent,
     );
   }
 
   if (defined $htmlContent) {
+    my $charset = ($htmlContent =~ /[^\x{00}-\x{7f}]/) ? 'UTF-8' : 'us-ascii';
     $htmlpart = Email::MIME->create(
       attributes => {
         content_type => 'text/html',
-        charset => 'UTF-8',
+        charset => $charset,
       },
-      body => Encode::encode_utf8($htmlContent),
+      body => $charset eq 'UTF-8' ? Encode::encode_utf8($htmlContent) : $htmlContent,
     );
   }
 
@@ -646,23 +651,24 @@ sub make {
     );
   }
   elsif ($textpart) {
+    my $cs = ($textContent =~ /[^\x{00}-\x{7f}]/) ? 'UTF-8' : 'us-ascii';
     $MIME = Email::MIME->create(
-      attributes => { content_type => 'text/plain', charset => 'UTF-8' },
+      attributes => { content_type => 'text/plain', charset => $cs },
       header_str => \@header,
-      body => Encode::encode_utf8($textContent),
+      body => $cs eq 'UTF-8' ? Encode::encode_utf8($textContent) : $textContent,
     );
   }
   elsif ($htmlpart) {
+    my $cs = ($htmlContent =~ /[^\x{00}-\x{7f}]/) ? 'UTF-8' : 'us-ascii';
     $MIME = Email::MIME->create(
-      attributes => { content_type => 'text/html', charset => 'UTF-8' },
+      attributes => { content_type => 'text/html', charset => $cs },
       header_str => \@header,
-      body => Encode::encode_utf8($htmlContent),
+      body => $cs eq 'UTF-8' ? Encode::encode_utf8($htmlContent) : $htmlContent,
     );
   }
   else {
-    # Empty message
     $MIME = Email::MIME->create(
-      attributes => { content_type => 'text/plain', charset => 'UTF-8' },
+      attributes => { content_type => 'text/plain', charset => 'us-ascii' },
       header_str => \@header,
       body => '',
     );
