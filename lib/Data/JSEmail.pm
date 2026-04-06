@@ -463,27 +463,33 @@ sub _makeatt {
   my $att = shift;
   my $getblob = shift;
 
-  my %attributes = (
-    content_type => $att->{type},
-    name => $att->{name},
-    filename => $att->{name},
-    disposition => $att->{isInline} ? 'inline' : 'attachment',
-  );
+  my $disp = $att->{disposition} || ($att->{isInline} ? 'inline' : 'attachment');
 
-  my %headers;
-  if ($att->{cid}) {
-    $headers{'Content-ID'} = "<$att->{cid}>";
-  }
+  my %attributes = (
+    content_type => $att->{type} || 'application/octet-stream',
+    disposition => $disp,
+  );
+  $attributes{name} = $att->{name} if $att->{name};
+  $attributes{filename} = $att->{name} if $att->{name};
 
   my ($type, $content) = $getblob->($att->{blobId});
+  $content //= '';
 
-  $attributes{encoding} = _detect_encoding($content, $att->{type});
+  $attributes{encoding} = _detect_encoding($content, $attributes{content_type});
 
-  return Email::MIME->create(
+  my $part = Email::MIME->create(
     attributes => \%attributes,
-    headers => \%headers,
     body => $content,
   );
+
+  if ($att->{cid}) {
+    $part->header_str_set('Content-ID' => "<$att->{cid}>");
+  }
+  if ($att->{language} && ref($att->{language}) eq 'ARRAY') {
+    $part->header_str_set('Content-Language' => join(', ', @{$att->{language}}));
+  }
+
+  return $part;
 }
 
 sub make {
