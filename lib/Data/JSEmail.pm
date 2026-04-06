@@ -554,18 +554,21 @@ sub make {
 
   my $textContent;
   my $htmlContent;
+  my %textMeta;   # cid, language, disposition, name from body part
+  my %htmlMeta;
 
   if ($args->{textBody} && ref($args->{textBody}) eq 'ARRAY') {
     for my $part (@{$args->{textBody}}) {
       my $partId = $part->{partId};
       if ($partId && $bodyValues->{$partId}) {
         $textContent = $bodyValues->{$partId}{value};
+        %textMeta = map { $_ => $part->{$_} } grep { defined $part->{$_} } qw(cid language disposition name);
         last;
       }
-      # blobId reference
       if ($part->{blobId} && $getblob) {
         my ($type, $content) = $getblob->($part->{blobId});
         $textContent = $content;
+        %textMeta = map { $_ => $part->{$_} } grep { defined $part->{$_} } qw(cid language disposition name);
         last;
       }
     }
@@ -576,11 +579,13 @@ sub make {
       my $partId = $part->{partId};
       if ($partId && $bodyValues->{$partId}) {
         $htmlContent = $bodyValues->{$partId}{value};
+        %htmlMeta = map { $_ => $part->{$_} } grep { defined $part->{$_} } qw(cid language disposition name);
         last;
       }
       if ($part->{blobId} && $getblob) {
         my ($type, $content) = $getblob->($part->{blobId});
         $htmlContent = $content;
+        %htmlMeta = map { $_ => $part->{$_} } grep { defined $part->{$_} } qw(cid language disposition name);
         last;
       }
     }
@@ -597,28 +602,39 @@ sub make {
   my $htmlpart;
 
   if (defined $textContent) {
-    # Use us-ascii charset if content is pure 7-bit ASCII, UTF-8 otherwise.
-    # Note: the JMAP test suite (text-body.t) is strict about expecting
-    # us-ascii for plain ASCII content, even though UTF-8 is valid.
     my $charset = ($textContent =~ /[^\x{00}-\x{7f}]/) ? 'UTF-8' : 'us-ascii';
+    my %attrs = (content_type => 'text/plain', charset => $charset);
+    $attrs{disposition} = $textMeta{disposition} if $textMeta{disposition};
+    $attrs{filename} = $textMeta{name} if $textMeta{name};
+    $attrs{name} = $textMeta{name} if $textMeta{name};
     $textpart = Email::MIME->create(
-      attributes => {
-        content_type => 'text/plain',
-        charset => $charset,
-      },
+      attributes => \%attrs,
       body => $charset eq 'UTF-8' ? Encode::encode_utf8($textContent) : $textContent,
     );
+    if ($textMeta{cid}) {
+      $textpart->header_str_set('Content-ID' => "<$textMeta{cid}>");
+    }
+    if ($textMeta{language} && ref($textMeta{language}) eq 'ARRAY') {
+      $textpart->header_str_set('Content-Language' => join(', ', @{$textMeta{language}}));
+    }
   }
 
   if (defined $htmlContent) {
     my $charset = ($htmlContent =~ /[^\x{00}-\x{7f}]/) ? 'UTF-8' : 'us-ascii';
+    my %attrs = (content_type => 'text/html', charset => $charset);
+    $attrs{disposition} = $htmlMeta{disposition} if $htmlMeta{disposition};
+    $attrs{filename} = $htmlMeta{name} if $htmlMeta{name};
+    $attrs{name} = $htmlMeta{name} if $htmlMeta{name};
     $htmlpart = Email::MIME->create(
-      attributes => {
-        content_type => 'text/html',
-        charset => $charset,
-      },
+      attributes => \%attrs,
       body => $charset eq 'UTF-8' ? Encode::encode_utf8($htmlContent) : $htmlContent,
     );
+    if ($htmlMeta{cid}) {
+      $htmlpart->header_str_set('Content-ID' => "<$htmlMeta{cid}>");
+    }
+    if ($htmlMeta{language} && ref($htmlMeta{language}) eq 'ARRAY') {
+      $htmlpart->header_str_set('Content-Language' => join(', ', @{$htmlMeta{language}}));
+    }
   }
 
   my @attparts;
