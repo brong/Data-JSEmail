@@ -667,20 +667,21 @@ sub make {
     );
   }
   elsif ($textpart) {
-    my $cs = ($textContent =~ /[^\x{00}-\x{7f}]/) ? 'UTF-8' : 'us-ascii';
-    $MIME = Email::MIME->create(
-      attributes => { content_type => 'text/plain', charset => $cs },
-      header_str => \@header,
-      body => $cs eq 'UTF-8' ? Encode::encode_utf8($textContent) : $textContent,
-    );
+    # Add message headers to the existing part (preserves Content-ID etc.)
+    while (@header) {
+      my $name = shift @header;
+      my $val = shift @header;
+      $textpart->header_str_set($name => $val) if defined $val;
+    }
+    $MIME = $textpart;
   }
   elsif ($htmlpart) {
-    my $cs = ($htmlContent =~ /[^\x{00}-\x{7f}]/) ? 'UTF-8' : 'us-ascii';
-    $MIME = Email::MIME->create(
-      attributes => { content_type => 'text/html', charset => $cs },
-      header_str => \@header,
-      body => $cs eq 'UTF-8' ? Encode::encode_utf8($htmlContent) : $htmlContent,
-    );
+    while (@header) {
+      my $name = shift @header;
+      my $val = shift @header;
+      $htmlpart->header_str_set($name => $val) if defined $val;
+    }
+    $MIME = $htmlpart;
   }
   else {
     $MIME = Email::MIME->create(
