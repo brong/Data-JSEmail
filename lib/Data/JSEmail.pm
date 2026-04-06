@@ -120,6 +120,7 @@ sub bodystructure {
     }
     $partno ||= '1';
     my $body = $eml->body();
+    my $raw_size = length($body); # size in octets of decoded content
     if ($type->{type} eq 'text') {
       # Decode charset to Perl character string
       my $decoded = eval { $eml->body_str() };
@@ -129,10 +130,11 @@ sub bodystructure {
         # Fallback: try UTF-8 decode
         $body = eval { Encode::decode('UTF-8', $body) } // $body;
       }
-      # RFC 8621: line endings MUST be \n not \r\n
-      $body =~ s/\r\n/\n/g;
+      # RFC 8621: line endings in bodyValues MUST be \n not \r\n
+      my $text_body = $body;
+      $text_body =~ s/\r\n/\n/g;
       $values->{$partno} = {
-        value => $body,
+        value => $text_body,
         isEncodingProblem => (defined $decoded ? $JSON::false : $JSON::true),
         isTruncated => $JSON::false,
       };
@@ -145,7 +147,7 @@ sub bodystructure {
       partId => "$partno",
       blobId => "m-$id-$partno",
       type => "$type->{type}/$type->{subtype}",
-      size => length($body),
+      size => $raw_size,
       headers => headers($eml),
       name => $disposition->{attributes}{filename} // $type->{attributes}{name},
       cid => asOneURL($eml->header('Content-Id')),
