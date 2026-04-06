@@ -5,7 +5,7 @@ use warnings;
 
 package Data::JSEmail;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 use JSON;
 use JSON::XS;
@@ -335,21 +335,26 @@ sub parseStructure {
   my $htmlBody = shift;
   my $attachments = shift;
 
+  my $textCount = $textBody ? scalar @$textBody : -1;
+  my $htmlCount = $htmlBody ? scalar @$htmlBody : -1;
+
   for (my $i = 0; $i < @$parts; $i++) {
     my $part = $parts->[$i];
     my $isMultipart = $part->{type} =~ m{^multipart/(.*)};
     my $subMultiType = $isMultipart ? $1 : '';
-    my $isInline = ($part->{disposition}//'none') ne 'attachment' &&
-        # Must be one of the allowed body types
-        ( $part->{type} eq 'text/plain' ||
-          $part->{type} eq 'text/html' ||
-          isInlineMediaType($part->{type}) ) &&
-        # If multipart/related, only the first part can be inline
-        # If a text part with a filename, and not the first item in the
-        # multipart, assume it is an attachment
+
+    # Determine part type (matching Cyrus classification)
+    my $isPlain = $part->{type} eq 'text/plain'
+               || $part->{type} eq 'text/richtext'
+               || $part->{type} eq 'text/enriched';
+    my $isHTML = $part->{type} eq 'text/html';
+    my $isInlineMedia = isInlineMediaType($part->{type});
+
+    my $isInline = ($part->{disposition} // '') ne 'attachment' &&
+        ($isPlain || $isHTML || $isInlineMedia) &&
         ($i == 0 ||
             ( $multipartType ne 'related' &&
-                ( isInlineMediaType($part->{type}) || !$part->{name} ) ) );
+                ( $isInlineMedia || !$part->{name} ) ) );
 
     if ($isMultipart) {
       parseStructure($part->{subParts}, $subMultiType,
@@ -358,24 +363,49 @@ sub parseStructure {
     }
     elsif ($isInline) {
       if ($multipartType eq 'alternative') {
-        if ($part->{type} eq 'text/plain') {
+        if ($isPlain && $textBody) {
           push @$textBody, $part;
-          next; #part
         }
-        elsif ($part->{type} eq 'text/html') {
+        elsif ($isHTML && $htmlBody) {
           push @$htmlBody, $part;
-          next; #part
+        }
+        else {
+          push @$attachments, $part;
+        }
+        next;
+      }
+      # Inside an alternative ancestor: seeing a text part means
+      # we can't also use it for HTML, and vice versa
+      if ($inAlternative) {
+        if ($isPlain) {
+          $htmlBody = undef;
+        }
+        elsif ($isHTML) {
+          $textBody = undef;
         }
       }
-      push @$textBody, $part;
-      push @$htmlBody, $part;
+      push @$textBody, $part if $textBody;
+      push @$htmlBody, $part if $htmlBody;
+      if ((!$textBody || !$htmlBody) && $isInlineMedia) {
+        push @$attachments, $part;
+      }
     }
     else {
       push @$attachments, $part;
     }
   }
 
-  # XXX - handle "we didn't find a matching part in a current alternative for text/plain AND text/html
+  # Alternative fallback: if only one type was found, copy to the other
+  if ($multipartType eq 'alternative' && $textBody && $htmlBody) {
+    if ($textCount == scalar @$textBody) {
+      # No text parts found, copy HTML parts to text
+      push @$textBody, @{$htmlBody}[$htmlCount .. $#$htmlBody];
+    }
+    if ($htmlCount == scalar @$htmlBody) {
+      # No HTML parts found, copy text parts to HTML
+      push @$htmlBody, @{$textBody}[$textCount .. $#$textBody];
+    }
+  }
 }
 
 sub _mkone {
