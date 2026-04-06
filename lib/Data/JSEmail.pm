@@ -591,10 +591,10 @@ sub make {
     }
   }
 
-  # Fallback: generate text from HTML if no text provided
-  if (!defined $textContent && defined $htmlContent) {
-    $textContent = htmltotext($htmlContent);
-  }
+  # Note: do NOT auto-generate text/plain from HTML. Per RFC 8621,
+  # if only htmlBody is provided, the server creates a single text/html
+  # part that appears in both textBody and htmlBody of the response.
+  # Generating a multipart/alternative would change the structure.
 
   # Build MIME parts
   my $MIME;
