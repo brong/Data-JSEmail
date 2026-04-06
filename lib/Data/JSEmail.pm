@@ -533,6 +533,22 @@ sub make {
     push @header, Sender => _mkemail($args->{sender});
   }
 
+  # Extract header:* overrides from body parts (RFC 8621 Email/set)
+  for my $partlist ($args->{textBody}, $args->{htmlBody}) {
+    next unless $partlist && ref($partlist) eq 'ARRAY';
+    for my $part (@$partlist) {
+      for my $key (keys %$part) {
+        next unless $key =~ /^header:(.+)/;
+        my $hname = $1;
+        my $hval = $part->{$key};
+        # Only add if not already set at top level
+        unless (grep { lc($_) eq lc($hname) } map { $header[$_] } grep { $_ % 2 == 0 } 0..$#header) {
+          push @header, $hname => $hval;
+        }
+      }
+    }
+  }
+
   # Extract body content from bodyValues via textBody/htmlBody part references
   my $bodyValues = $args->{bodyValues} || {};
 
