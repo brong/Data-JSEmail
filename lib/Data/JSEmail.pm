@@ -193,22 +193,24 @@ sub asCommaList {
   return \@list;
 }
 
-# NOTE: this is totally bogus..
 sub asURLs {
   my $val = shift;
   return undef unless defined $val;
-  unless ($val =~ m/\<.*\>/) {
-    $val =~ s/^\s+//;
-    $val =~ s/ .*//; # strip everything after first whitespace
-    return undef unless length($val);
-    return [$val];
-  }
+  $val =~ s/^\s+//;
+  $val =~ s/\s+$//;
+  return undef unless length($val);
 
+  # Extract URLs from angle brackets
   my @list;
   while ($val =~ m/<([^>]+)>/gs) {
     push @list, $1;
   }
-  return \@list;
+  return \@list if @list;
+
+  # No angle brackets — treat whole value as a URL if it looks like one
+  return undef unless $val =~ m{^[a-zA-Z][a-zA-Z0-9+.-]*:};
+  $val =~ s/ .*//; # strip after first whitespace
+  return [$val];
 }
 
 sub asOneURL {
@@ -243,11 +245,42 @@ sub asAddresses {
   return $arr;
 }
 
+sub asGroupedAddresses {
+  # RFC 8621: returns EmailAddressGroup[] — [{name, addresses}]
+  my $emails = shift;
+  return undef unless defined $emails;
+  my $addrs = eval { Email::MIME::Header::AddressList->from_mime_string($emails) };
+  return undef unless $addrs;
+  my @addrs = $addrs->groups();
+  my @res;
+  while (@addrs) {
+    my $group = shift @addrs;
+    my $list = shift @addrs;
+    my @addresses;
+    foreach my $addr (@$list) {
+      my $name = $addr->phrase();
+      my $email = $addr->address();
+      $email =~ s/\@(.*)/"@" . lc($1)/e if $email;
+      push @addresses, {
+        name => asText($name),
+        email => $email,
+      };
+    }
+    push @res, {
+      name => defined $group ? asText($group) : undef,
+      addresses => \@addresses,
+    };
+  }
+  return \@res;
+}
+
 sub asGroupAddresses {
+  # Internal format with sentinel entries (backward compat)
   my $emails = shift;
 
   return undef unless defined $emails;
-  my $addrs = Email::MIME::Header::AddressList->from_mime_string($emails);
+  my $addrs = eval { Email::MIME::Header::AddressList->from_mime_string($emails) };
+  return undef unless $addrs;
   my @addrs = $addrs->groups();
   my @res;
   while (@addrs) {
