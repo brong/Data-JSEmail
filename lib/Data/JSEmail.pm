@@ -216,7 +216,14 @@ sub asOneURL {
 sub asText {
   my $val = shift;
   return undef unless defined $val;
-  my $res = encode_utf8(NFC(decode('MIME-Header', $val)));
+  # Decode MIME-Header encoded words, then NFC normalize
+  my $decoded = eval { decode('MIME-Header', $val) };
+  $decoded = $val unless defined $decoded;
+  # If still raw bytes (not flagged as UTF-8), try UTF-8 decode
+  if (!Encode::is_utf8($decoded) && $decoded =~ /[\x80-\xff]/) {
+    $decoded = eval { Encode::decode('UTF-8', $decoded) } // $decoded;
+  }
+  my $res = NFC($decoded);
   $res =~ s/^\s*//;
   $res =~ s/\s*$//;
   return $res;
