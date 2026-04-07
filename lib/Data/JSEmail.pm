@@ -270,15 +270,25 @@ sub asGroupAddresses {
 
 sub headers {
   my $eml = shift;
-  my @list = $eml->header_obj->header_raw_pairs();
+  # Parse raw header string to preserve exact values including
+  # leading whitespace after colon (RFC 8621 raw header form)
+  my $raw = $eml->header_obj->as_string;
   my @res;
-  while (@list) {
-   my $name = shift @list;
-   my $value = shift @list;
-    push @res, {
-      name => $name,
-      value => $value,
-    };
+  # Unfold continuation lines first, then split on header boundaries
+  my @lines;
+  for my $line (split /\r?\n/, $raw) {
+    if ($line =~ /^\s/ && @lines) {
+      # Continuation line — append to previous
+      $lines[-1] .= "\r\n$line";
+    }
+    elsif ($line =~ /^([^:]+):(.*)/) {
+      push @lines, $line;
+    }
+  }
+  for my $line (@lines) {
+    if ($line =~ /^([^:]+):(.*)$/s) {
+      push @res, { name => $1, value => $2 };
+    }
   }
   return \@res;
 }
