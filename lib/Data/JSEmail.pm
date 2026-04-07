@@ -23,6 +23,8 @@ use DateTime::Format::Mail;
 use DateTime::Format::ISO8601::Format;
 
 use Digest::SHA;
+use Data::UUID;
+use Sys::Hostname;
 
 my $json = JSON::XS->new->utf8->canonical();
 
@@ -557,9 +559,118 @@ sub _makeatt {
   return $part;
 }
 
+my $_uuid_gen;
+sub default_header_defaults {
+  my ($name) = @_;
+  if (lc($name) eq 'date') {
+    return Date::Format::time2str("%a, %d %b %Y %H:%M:%S %z", time());
+  }
+  if (lc($name) eq 'message-id') {
+    $_uuid_gen ||= Data::UUID->new;
+    my $uuid = $_uuid_gen->to_string($_uuid_gen->create);
+    my $host = hostname();
+    return "<$uuid\@$host>";
+  }
+  return undef;
+}
+
+sub _apply_headers {
+  my ($mime, $headers) = @_;
+  while (@$headers) {
+    my $name = shift @$headers;
+    my $val = shift @$headers;
+    next unless defined $val;
+    if (ref($val) eq 'ARRAY') {
+      $mime->header_str_set($name => @$val);
+    } else {
+      $mime->header_str_set($name => $val);
+    }
+  }
+}
+
+sub _build_bodystructure {
+  my ($node, $bodyValues, $getblob) = @_;
+
+  my $type = $node->{type} || 'text/plain';
+
+  if ($type =~ m{^multipart/}i) {
+    # Multipart: recursively build subParts
+    my @parts;
+    for my $sub (@{$node->{subParts} || []}) {
+      push @parts, _build_bodystructure($sub, $bodyValues, $getblob);
+    }
+    my $mime = Email::MIME->create(
+      attributes => { content_type => $type },
+      parts => \@parts,
+    );
+    # Apply header:* from this node
+    _apply_bodystructure_headers($mime, $node);
+    return $mime;
+  }
+
+  # Leaf part: get content from partId/bodyValues or blobId
+  my $content = '';
+  if ($node->{partId} && $bodyValues->{$node->{partId}}) {
+    $content = $bodyValues->{$node->{partId}}{value} // '';
+  } elsif ($node->{blobId} && $getblob) {
+    my ($btype, $bcontent) = $getblob->($node->{blobId});
+    $content = $bcontent // '';
+  }
+
+  my $charset = 'us-ascii';
+  if ($type =~ m{^text/}i) {
+    $charset = ($content =~ /[^\x{00}-\x{7f}]/) ? 'UTF-8' : 'us-ascii';
+  }
+
+  my %attrs = (content_type => $type);
+  $attrs{charset} = $charset if $type =~ m{^text/}i;
+  $attrs{disposition} = $node->{disposition} if $node->{disposition};
+  $attrs{filename} = $node->{name} if $node->{name};
+  $attrs{name} = $node->{name} if $node->{name};
+
+  my $body = ($charset eq 'UTF-8' && $type =~ m{^text/}i)
+    ? Encode::encode_utf8($content) : $content;
+
+  my $mime = Email::MIME->create(
+    attributes => \%attrs,
+    body => $body,
+  );
+
+  # Set body part metadata
+  if (defined $node->{cid}) {
+    _valid_cid($node->{cid});
+    $mime->header_str_set('Content-ID' => "<$node->{cid}>");
+  }
+  if ($node->{language} && ref($node->{language}) eq 'ARRAY') {
+    $mime->header_str_set('Content-Language' => join(', ', @{$node->{language}}));
+  }
+
+  # Apply header:* from this node
+  _apply_bodystructure_headers($mime, $node);
+
+  return $mime;
+}
+
+sub _apply_bodystructure_headers {
+  my ($mime, $node) = @_;
+  for my $key (keys %$node) {
+    next unless $key =~ /^header:(.+)/;
+    my $hname = $1;
+    my $hval = $node->{$key};
+    # Skip Content-* headers that are managed by Email::MIME
+    next if $hname =~ /^Content-/i;
+    if (ref($hval) eq 'ARRAY') {
+      $mime->header_str_set($hname => @$hval);
+    } else {
+      $mime->header_str_set($hname => $hval) if defined $hval;
+    }
+  }
+}
+
 sub make {
   my $args = shift;
   my $getblob = shift;
+  my $defaults_cb = shift || \&default_header_defaults;
 
   # RFC 8621 Email/set create format:
   #   from, to, cc, bcc, replyTo, sender: EmailAddress[]
@@ -571,45 +682,60 @@ sub make {
   #   bodyValues: Id[EmailBodyValue] (partId => {value: String})
   #   attachments: EmailBodyPart[] (each with blobId)
 
-  my @header;
-  push @header, From => _mkemail($args->{from}) if $args->{from};
-  push @header, To => _mkemail($args->{to}) if $args->{to};
-  push @header, Cc => _mkemail($args->{cc}) if $args->{cc};
-  push @header, Bcc => _mkemail($args->{bcc}) if $args->{bcc};
-  push @header, Subject => $args->{subject} if defined $args->{subject};
+  # Follow RFC 8621 / Cyrus precedence:
+  #   1. header:* properties (already converted from typed forms by caller)
+  #   2. Convenience properties (only if header:* didn't set that header)
+  #   3. Defaults (only if neither header:* nor convenience set the header)
 
-  if ($args->{sentAt}) {
-    push @header, Date => $args->{sentAt};
-  }
-  elsif ($args->{msgdate}) {
-    push @header, Date => Date::Format::time2str("%a, %d %b %Y %H:%M:%S %z", $args->{msgdate});
-  }
-  else {
-    push @header, Date => Date::Format::time2str("%a, %d %b %Y %H:%M:%S %z", time());
-  }
-
-  # messageId handled after header:* extraction (see below)
-  if ($args->{inReplyTo} && ref($args->{inReplyTo}) eq 'ARRAY' && @{$args->{inReplyTo}}) {
-    push @header, 'In-Reply-To' => join(' ', map { "<$_>" } @{$args->{inReplyTo}});
-  }
-  if ($args->{references} && ref($args->{references}) eq 'ARRAY' && @{$args->{references}}) {
-    push @header, 'References' => join(' ', map { "<$_>" } @{$args->{references}});
-  }
-  if ($args->{replyTo}) {
-    push @header, 'Reply-To' => _mkemail($args->{replyTo});
-  }
-  if ($args->{sender}) {
-    push @header, Sender => _mkemail($args->{sender});
-  }
-
-  # Extract header:* overrides from top-level and body parts (RFC 8621 Email/set)
+  # Step 1: Collect top-level header:* overrides into a lookup
+  my %header_override;  # lc(name) => 1
   for my $key (keys %$args) {
     next unless $key =~ /^header:(.+)/;
-    my $hname = $1;
-    my $hval = $args->{$key};
-    unless (grep { lc($_) eq lc($hname) } map { $header[$_] } grep { $_ % 2 == 0 } 0..$#header) {
-      push @header, $hname => $hval;
+    $header_override{lc $1} = 1;
+  }
+
+  my @header;
+
+  # Step 2: Convenience properties (skip if header:* already provides it)
+  push @header, From => _mkemail($args->{from})
+    if $args->{from} && !$header_override{from};
+  push @header, To => _mkemail($args->{to})
+    if $args->{to} && !$header_override{to};
+  push @header, Cc => _mkemail($args->{cc})
+    if $args->{cc} && !$header_override{cc};
+  push @header, Bcc => _mkemail($args->{bcc})
+    if $args->{bcc} && !$header_override{bcc};
+  push @header, Subject => $args->{subject}
+    if defined($args->{subject}) && !$header_override{subject};
+  if (!$header_override{date}) {
+    if ($args->{sentAt}) {
+      push @header, Date => $args->{sentAt};
     }
+    elsif ($args->{msgdate}) {
+      push @header, Date => Date::Format::time2str("%a, %d %b %Y %H:%M:%S %z", $args->{msgdate});
+    }
+  }
+  if ($args->{messageId} && ref($args->{messageId}) eq 'ARRAY' && @{$args->{messageId}}
+      && !$header_override{'message-id'}) {
+    push @header, 'Message-ID' => join(' ', map { "<$_>" } @{$args->{messageId}});
+  }
+  if ($args->{inReplyTo} && ref($args->{inReplyTo}) eq 'ARRAY' && @{$args->{inReplyTo}}
+      && !$header_override{'in-reply-to'}) {
+    push @header, 'In-Reply-To' => join(' ', map { "<$_>" } @{$args->{inReplyTo}});
+  }
+  if ($args->{references} && ref($args->{references}) eq 'ARRAY' && @{$args->{references}}
+      && !$header_override{references}) {
+    push @header, 'References' => join(' ', map { "<$_>" } @{$args->{references}});
+  }
+  push @header, 'Reply-To' => _mkemail($args->{replyTo})
+    if $args->{replyTo} && !$header_override{'reply-to'};
+  push @header, Sender => _mkemail($args->{sender})
+    if $args->{sender} && !$header_override{sender};
+
+  # Step 2b: Add all header:* values
+  for my $key (keys %$args) {
+    next unless $key =~ /^header:(.+)/;
+    push @header, $1 => $args->{$key};
   }
   for my $partlist ($args->{textBody}, $args->{htmlBody}) {
     next unless $partlist && ref($partlist) eq 'ARRAY';
@@ -617,26 +743,45 @@ sub make {
       for my $key (keys %$part) {
         next unless $key =~ /^header:(.+)/;
         my $hname = $1;
-        my $hval = $part->{$key};
-        # Only add if not already set at top level
-        unless (grep { lc($_) eq lc($hname) } map { $header[$_] } grep { $_ % 2 == 0 } 0..$#header) {
-          push @header, $hname => $hval;
-        }
+        # Only add if not already set by top-level header:* or convenience
+        my %have_so_far = map { lc($header[$_]) => 1 } grep { $_ % 2 == 0 } 0..$#header;
+        push @header, $hname => $part->{$key} unless $have_so_far{lc $hname};
       }
     }
   }
 
-  # Message-ID: set from args, or leave what header:* provided, or generate default
-  my $has_msgid = grep { lc($_) eq 'message-id' } map { $header[$_] } grep { $_ % 2 == 0 } 0..$#header;
-  if (!$has_msgid) {
-    if ($args->{messageId} && ref($args->{messageId}) eq 'ARRAY' && @{$args->{messageId}}) {
-      push @header, 'Message-ID' => join(' ', map { "<$_>" } @{$args->{messageId}});
+  # Step 3: Defaults via callback (only if nothing set them)
+  my %have = map { lc($header[$_]) => 1 } grep { $_ % 2 == 0 } 0..$#header;
+  for my $name (qw(Date Message-ID)) {
+    next if $have{lc $name};
+    my $val = $defaults_cb->($name);
+    push @header, $name => $val if defined $val;
+  }
+
+  my $bodyValues = $args->{bodyValues} || {};
+
+  # bodyStructure mode: build MIME tree from bodyStructure recursively
+  if ($args->{bodyStructure}) {
+    my $MIME = _build_bodystructure($args->{bodyStructure}, $bodyValues, $getblob);
+
+    # Apply message-level headers to the top-level MIME part
+    while (@header) {
+      my $name = shift @header;
+      my $val = shift @header;
+      if (ref($val) eq 'ARRAY') {
+        # :all style - set multiple values
+        $MIME->header_str_set($name => @$val);
+      } else {
+        $MIME->header_str_set($name => $val) if defined $val;
+      }
     }
-    # else: Email::MIME will generate one, or caller should set msgdate-based default
+
+    my $res = $MIME->as_string();
+    $res =~ s/\r?\n/\r\n/gs;
+    return $res;
   }
 
   # Extract body content from bodyValues via textBody/htmlBody part references
-  my $bodyValues = $args->{bodyValues} || {};
 
   my $textContent;
   my $htmlContent;
@@ -767,40 +912,33 @@ sub make {
       $body = $textpart || $htmlpart;
     }
     $MIME = Email::MIME->create(
-      header_str => [@header, 'Content-Type' => 'multipart/mixed'],
+      attributes => { content_type => 'multipart/mixed' },
       parts => [$body, @attparts],
     );
+    _apply_headers($MIME, \@header);
   }
   elsif ($textpart && $htmlpart) {
     $MIME = Email::MIME->create(
       attributes => { content_type => 'multipart/alternative' },
-      header_str => \@header,
       parts => [$textpart, $htmlpart],
     );
+    _apply_headers($MIME, \@header);
   }
   elsif ($textpart) {
     # Add message headers to the existing part (preserves Content-ID etc.)
-    while (@header) {
-      my $name = shift @header;
-      my $val = shift @header;
-      $textpart->header_str_set($name => $val) if defined $val;
-    }
+    _apply_headers($textpart, \@header);
     $MIME = $textpart;
   }
   elsif ($htmlpart) {
-    while (@header) {
-      my $name = shift @header;
-      my $val = shift @header;
-      $htmlpart->header_str_set($name => $val) if defined $val;
-    }
+    _apply_headers($htmlpart, \@header);
     $MIME = $htmlpart;
   }
   else {
     $MIME = Email::MIME->create(
       attributes => { content_type => 'text/plain', charset => 'us-ascii' },
-      header_str => \@header,
       body => '',
     );
+    _apply_headers($MIME, \@header);
   }
 
   my $res = $MIME->as_string();
