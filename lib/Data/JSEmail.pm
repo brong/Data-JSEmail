@@ -162,7 +162,11 @@ sub bodystructure {
 sub asDate {
   my $val = shift;
   return undef unless defined $val;
-  $val =~ s/\(.*//;
+  $val =~ s/\(.*//;  # strip comments
+  $val =~ s/^\s+//;  # strip leading whitespace
+  $val =~ s/\s+$//;  # strip trailing whitespace
+  # Add :00 seconds if missing (e.g. "23:32 -0330" → "23:32:00 -0330")
+  $val =~ s/(\s\d{2}:\d{2})\s+([-+]\d{4})/$1:00 $2/;
   my $dt = eval { DateTime::Format::Mail->parse_datetime($val) };
   return undef unless $dt;
   my $tz = $dt->time_zone;
