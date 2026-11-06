@@ -135,9 +135,14 @@ sub bodystructure {
       # RFC 8621: line endings in bodyValues MUST be \n not \r\n
       my $text_body = $body;
       $text_body =~ s/\r\n/\n/g;
+      # RFC 8621 S4.1.4: isEncodingProblem is also true when the
+      # content-transfer-encoding was unknown.  Email::MIME::body()
+      # quietly treats an unknown one as 7bit, so check it ourselves;
+      # the value stays the best-effort (undecoded) body.
+      my $problem = !defined($decoded) || !_known_cte($eml);
       $values->{$partno} = {
         value => $text_body,
-        isEncodingProblem => (defined $decoded ? $JSON::false : $JSON::true),
+        isEncodingProblem => ($problem ? $JSON::true : $JSON::false),
         isTruncated => $JSON::false,
       };
     }
@@ -337,6 +342,21 @@ sub headers {
     }
   }
   return \@res;
+}
+
+# The content-transfer-encodings RFC 2045 S6.1 defines; anything else
+# (an x-token, a typo) is one we cannot decode.
+my %KNOWN_CTE = map { $_ => 1 } qw(7bit 8bit binary base64 quoted-printable);
+
+# True if the part has no Content-Transfer-Encoding or one we know.
+sub _known_cte {
+  my $eml = shift;
+  my $cte = $eml->header('Content-Transfer-Encoding');
+  return 1 unless defined $cte;
+  $cte =~ s/;.*//s;           # drop any parameters (S/MIME etc.)
+  $cte =~ s/\A\s+|\s+\z//g;
+  return 1 if $cte eq '';
+  return $KNOWN_CTE{lc $cte} ? 1 : 0;
 }
 
 sub _clean {
