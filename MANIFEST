@@ -5,4 +5,5 @@ LICENSE
 Makefile.PL
 MANIFEST			This list of files
 t/cyrus-jmap.t
+t/bare-addresses.t
 t/encoding-problem.t

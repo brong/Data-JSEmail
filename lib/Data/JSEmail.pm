@@ -13,6 +13,8 @@ use HTML::Strip;
 use Email::MIME;
 use Email::MIME::ContentType;
 use Email::MIME::Header::AddressList;
+use Email::MIME::Encode;
+use Email::Address::XS;
 use Encode;
 use Encode::MIME::Header;
 use Unicode::Normalize;
@@ -501,11 +503,101 @@ sub _mkone {
   my $email = $h->{email};
   my $name = $h->{name};
   if (defined $name && $name ne '') {
-    return qq{"$name" <$email>};
+    (my $quoted = $name) =~ s/(["\\])/\\$1/g;
+    return qq{"$quoted" <$email>};
   }
   else {
     return $email;
   }
+}
+
+# Set a header from Perl character strings.  Email::MIME does the
+# encoding, except for an address-list header holding a mailbox it
+# cannot parse as an addr-spec (no '@', say): Email::MIME drops such a
+# mailbox, so "From: user1" would come out as an empty From:.  RFC 8621
+# S4.1.2.3 lets an EmailAddress "email" lack the '@', and S4.6 lets the
+# message of a draft be invalid per RFC 5322 (it is checked when it is
+# submitted), so such a header is written as given instead.
+sub _header_set {
+  my ($mime, $name, @vals) = @_;
+  if (_is_address_header($name)) {
+    my @raw = map { _encode_lossy_addresses($_) } @vals;
+    if (grep { defined } @raw) {
+      my @enc = map {
+        defined $raw[$_] ? $raw[$_]
+          : Email::MIME::Encode::maybe_mime_encode_header($name, $vals[$_], 'UTF-8')
+      } 0 .. $#vals;
+      return $mime->header_raw_set($name => @enc);
+    }
+  }
+  return $mime->header_str_set($name => @vals);
+}
+
+sub _is_address_header {
+  my $name = lc shift;
+  my $class = $Email::MIME::Header::header_to_class_map{$name} // '';
+  return $class eq 'Email::MIME::Header::AddressList';
+}
+
+my $ATEXT = qr{[A-Za-z0-9!#\$%&'*+/=?^_`{|}~-]};
+
+# A phrase (display-name or group name): as-is if it is atoms, an
+# RFC 2047 encoded-word if it is not ASCII, else a quoted-string.
+sub _encode_phrase {
+  my $phrase = shift;
+  return $phrase if $phrase =~ m{\A$ATEXT+(?: $ATEXT+)*\z};
+  if ($phrase =~ /[^\x00-\x7f]/) {
+    my $enc = Encode::encode('MIME-Q', $phrase);
+    $enc =~ s/\r?\n//g;
+    return $enc;
+  }
+  (my $q = $phrase) =~ s/(["\\])/\\$1/g;
+  return qq{"$q"};
+}
+
+# Returns undef when Email::MIME will encode $val without loss (every
+# mailbox in it is a valid addr-spec), else the header value with each
+# mailbox Email::MIME would drop written as given.
+sub _encode_lossy_addresses {
+  my $val = shift;
+  return undef unless defined $val && $val =~ /\S/;
+  my @groups = Email::Address::XS::parse_email_groups($val);
+  return undef unless grep { !$_->is_valid } map { @{$groups[$_]} } grep { $_ % 2 } 0 .. $#groups;
+
+  my @out;
+  while (@groups) {
+    my ($group, $list) = splice(@groups, 0, 2);
+    my @mbox;
+    for my $addr (@$list) {
+      my $phrase = $addr->phrase;
+      my $spec;
+      if ($addr->is_valid) {
+        $spec = $addr->address;
+      }
+      elsif (defined $addr->user) {
+        $spec = $addr->user;
+        $spec .= '@' . $addr->host if defined $addr->host;
+      }
+      else {
+        # No angle-addr: a bare token such as "user1", which the parser
+        # reads as a phrase.  Keep it exactly as given.
+        $spec = $addr->original;
+        $phrase = undef;
+      }
+      $spec = Encode::encode('UTF-8', $spec) if $spec =~ /[^\x00-\x7f]/;
+      push @mbox, (defined $phrase && $phrase ne '')
+        ? _encode_phrase($phrase) . " <$spec>"
+        : $spec;
+    }
+    if (defined $group) {
+      push @out, _encode_phrase($group) . ': ' . join(', ', @mbox) . ';';
+    }
+    else {
+      push @out, @mbox;
+    }
+  }
+  # Written raw, so nothing in it may end the header line.
+  return join(', ', @out) =~ s/[\r\n]+/ /gr;
 }
 
 sub _mkemail {
@@ -601,9 +693,9 @@ sub _apply_headers {
     my $val = shift @$headers;
     next unless defined $val;
     if (ref($val) eq 'ARRAY') {
-      $mime->header_str_set($name => @$val);
+      _header_set($mime, $name => @$val);
     } else {
-      $mime->header_str_set($name => $val);
+      _header_set($mime, $name => $val);
     }
   }
 }
@@ -680,9 +772,9 @@ sub _apply_bodystructure_headers {
     # Skip Content-* headers that are managed by Email::MIME
     next if $hname =~ /^Content-/i;
     if (ref($hval) eq 'ARRAY') {
-      $mime->header_str_set($hname => @$hval);
+      _header_set($mime, $hname => @$hval);
     } else {
-      $mime->header_str_set($hname => $hval) if defined $hval;
+      _header_set($mime, $hname => $hval) if defined $hval;
     }
   }
 }
@@ -790,9 +882,9 @@ sub make {
       my $val = shift @header;
       if (ref($val) eq 'ARRAY') {
         # :all style - set multiple values
-        $MIME->header_str_set($name => @$val);
+        _header_set($MIME, $name => @$val);
       } else {
-        $MIME->header_str_set($name => $val) if defined $val;
+        _header_set($MIME, $name => $val) if defined $val;
       }
     }
 
