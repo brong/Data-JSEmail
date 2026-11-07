@@ -857,25 +857,17 @@ sub _set_raw_header {
   $mime->header_raw_set($name => map { _raw_for_write($_) } @$vals);
 }
 
-sub _detect_encoding {
-  my $content = shift;
-  my $type = shift;
-
-  if ($type =~ m/^message/) {
-    if ($content =~ m/[^\x{09}\x{0a}\x{0d}\x{20}-\x{7e}]/) {
-      return '8bit';
-    }
-    return '7bit';
-  }
-
-  if ($type =~ m/^text/) {
-    # XXX - also line lengths?
-    if ($content =~ m/[^\x{09}\x{0a}\x{0d}\x{20}-\x{7e}]/) {
-      return 'quoted-printable';
-    }
-    return '7bit';
-  }
-
+# The Content-Transfer-Encoding for a leaf's octets.  make() ends by
+# rewriting every line ending to CRLF, so whatever is written raw must
+# survive that: text is 7bit, or quoted-printable when it has 8-bit or
+# control octets or a line too long for SMTP; message/* is 7bit or 8bit
+# (RFC 2046 S5.2.1 forbids anything else); everything else is base64,
+# so binary octets never meet the rewrite.
+sub _cte {
+  my ($octets, $type) = @_;
+  my $plain = $octets !~ /[^\x09\x0a\x0d\x20-\x7e]/ && $octets !~ /[^\n]{999}/;
+  return $plain ? '7bit' : '8bit' if $type =~ m{^message/}i;
+  return $plain ? '7bit' : 'quoted-printable' if $type =~ m{^text/}i;
   return 'base64';
 }
 
@@ -889,38 +881,72 @@ sub _valid_cid {
   return 1;
 }
 
-sub _makeatt {
-  my $att = shift;
-  my $getblob = shift;
+# One leaf EmailBodyPart as a MIME part: the only place make() encodes
+# body content, used for bodyStructure leaves and for the textBody,
+# htmlBody and attachments shorthand alike.
+#
+# The content is the part's bodyValues value (characters, written as
+# UTF-8) if it has a partId there, else its blob (octets, written as they
+# are), else empty.  $opt{type} and $opt{disposition} are the defaults
+# for a part that gives none; $opt{headers} (default true) applies the
+# part's own header:* properties to it.
+sub _leaf_part {
+  my ($node, $bodyValues, $getblob, %opt) = @_;
+  my $type = $node->{type} || $opt{type} || 'application/octet-stream';
+  my $is_text = $type =~ m{^text/}i;
 
-  my $disp = $att->{disposition} || ($att->{isInline} ? 'inline' : 'attachment');
-
-  my %attributes = (
-    content_type => $att->{type} || 'application/octet-stream',
-    disposition => $disp,
-  );
-  $attributes{name} = $att->{name} if $att->{name};
-  $attributes{filename} = $att->{name} if $att->{name};
-
-  my ($type, $content) = $getblob->($att->{blobId});
-  $content //= '';
-
-  $attributes{encoding} = _detect_encoding($content, $attributes{content_type});
-
-  my $part = Email::MIME->create(
-    attributes => \%attributes,
-    body => $content,
-  );
-
-  if ($att->{cid}) {
-    _valid_cid($att->{cid});
-    $part->header_str_set('Content-ID' => "<$att->{cid}>");
+  my ($octets, $charset);
+  my $partId = $node->{partId};
+  if (defined $partId && $bodyValues->{$partId}) {
+    my $value = $bodyValues->{$partId}{value} // '';
+    $octets = Encode::encode('UTF-8', $value);
+    $charset = $value =~ /[^\x00-\x7f]/ ? 'UTF-8' : 'us-ascii';
   }
-  if ($att->{language} && ref($att->{language}) eq 'ARRAY') {
-    $part->header_str_set('Content-Language' => join(', ', @{$att->{language}}));
+  elsif ($node->{blobId} && $getblob) {
+    my $btype;
+    ($btype, $octets) = $getblob->($node->{blobId});
+    $octets //= '';
+    # Octets already; a wide character means the getblob gave text.
+    $octets = Encode::encode('UTF-8', $octets) if $octets =~ /[^\x00-\xff]/;
+    if ($is_text) {
+      # S4.6: with a blobId, charset says what the octets are.  Else the
+      # blob's own type may, else they are ASCII or UTF-8, or unknown.
+      ($charset) = ($btype // '') =~ /;\s*charset\s*=\s*"?([^";\s]+)/i;
+      $charset = $node->{charset} if $node->{charset};
+      $charset //= $octets !~ /[^\x00-\x7f]/ ? 'us-ascii'
+                 : _is_utf8_octets($octets) ? 'UTF-8' : undef;
+    }
   }
+  else {
+    $octets = '';
+    $charset = 'us-ascii';
+  }
+  # Text is written in canonical form, CRLF line ends (RFC 2046 S4.1.1):
+  # the final rewrite makes every line end CRLF.
+  $octets =~ s/\r\n/\n/g if $is_text;
 
-  return $part;
+  my %attrs = (content_type => $type, encoding => _cte($octets, $type));
+  $attrs{charset} = $charset if $is_text && defined $charset;
+  my $disp = $node->{disposition} || $opt{disposition};
+  $attrs{disposition} = $disp if $disp;
+  $attrs{filename} = $attrs{name} = $node->{name} if $node->{name};
+
+  my $mime = Email::MIME->create(attributes => \%attrs, body => $octets);
+
+  if (defined $node->{cid}) {
+    _valid_cid($node->{cid});
+    $mime->header_str_set('Content-ID' => "<$node->{cid}>");
+  }
+  if ($node->{language} && ref($node->{language}) eq 'ARRAY') {
+    $mime->header_str_set('Content-Language' => join(', ', @{$node->{language}}));
+  }
+  _apply_bodystructure_headers($mime, $node) if $opt{headers} // 1;
+  return $mime;
+}
+
+sub _is_utf8_octets {
+  my $copy = shift;
+  return defined eval { Encode::decode('UTF-8', $copy, Encode::FB_CROAK) };
 }
 
 my $_uuid_gen;
@@ -958,47 +984,7 @@ sub _build_bodystructure {
     return $mime;
   }
 
-  # Leaf part: get content from partId/bodyValues or blobId
-  my $content = '';
-  if ($node->{partId} && $bodyValues->{$node->{partId}}) {
-    $content = $bodyValues->{$node->{partId}}{value} // '';
-  } elsif ($node->{blobId} && $getblob) {
-    my ($btype, $bcontent) = $getblob->($node->{blobId});
-    $content = $bcontent // '';
-  }
-
-  my $charset = 'us-ascii';
-  if ($type =~ m{^text/}i) {
-    $charset = ($content =~ /[^\x{00}-\x{7f}]/) ? 'UTF-8' : 'us-ascii';
-  }
-
-  my %attrs = (content_type => $type);
-  $attrs{charset} = $charset if $type =~ m{^text/}i;
-  $attrs{disposition} = $node->{disposition} if $node->{disposition};
-  $attrs{filename} = $node->{name} if $node->{name};
-  $attrs{name} = $node->{name} if $node->{name};
-
-  my $body = ($charset eq 'UTF-8' && $type =~ m{^text/}i)
-    ? Encode::encode_utf8($content) : $content;
-
-  my $mime = Email::MIME->create(
-    attributes => \%attrs,
-    body => $body,
-  );
-
-  # Set body part metadata
-  if (defined $node->{cid}) {
-    _valid_cid($node->{cid});
-    $mime->header_str_set('Content-ID' => "<$node->{cid}>");
-  }
-  if ($node->{language} && ref($node->{language}) eq 'ARRAY') {
-    $mime->header_str_set('Content-Language' => join(', ', @{$node->{language}}));
-  }
-
-  # Apply header:* from this node
-  _apply_bodystructure_headers($mime, $node);
-
-  return $mime;
+  return _leaf_part($node, $bodyValues, $getblob, type => 'text/plain');
 }
 
 sub _apply_bodystructure_headers {
@@ -1099,121 +1085,40 @@ sub _make {
     return $res;
   }
 
-  # Extract body content from bodyValues via textBody/htmlBody part references
-
-  my $textContent;
-  my $htmlContent;
-  my %textMeta;   # cid, language, disposition, name from body part
-  my %htmlMeta;
-
-  if ($args->{textBody} && ref($args->{textBody}) eq 'ARRAY') {
-    for my $part (@{$args->{textBody}}) {
-      my $partId = $part->{partId};
-      if ($partId && $bodyValues->{$partId}) {
-        $textContent = $bodyValues->{$partId}{value};
-        %textMeta = map { $_ => $part->{$_} } grep { defined $part->{$_} } qw(cid language disposition name);
-        last;
-      }
-      if ($part->{blobId} && $getblob) {
-        my ($type, $content) = $getblob->($part->{blobId});
-        $textContent = $content;
-        %textMeta = map { $_ => $part->{$_} } grep { defined $part->{$_} } qw(cid language disposition name);
-        last;
-      }
+  # textBody/htmlBody: the first part with content (a partId in
+  # bodyValues, or a blobId).  Its header:* properties went on the
+  # message above.
+  my $first_with_content = sub {
+    my $list = shift;
+    return undef unless $list && ref($list) eq 'ARRAY';
+    for my $part (@$list) {
+      return $part if defined $part->{partId} && $bodyValues->{$part->{partId}};
+      return $part if $part->{blobId} && $getblob;
     }
-  }
-
-  if ($args->{htmlBody} && ref($args->{htmlBody}) eq 'ARRAY') {
-    for my $part (@{$args->{htmlBody}}) {
-      my $partId = $part->{partId};
-      if ($partId && $bodyValues->{$partId}) {
-        $htmlContent = $bodyValues->{$partId}{value};
-        %htmlMeta = map { $_ => $part->{$_} } grep { defined $part->{$_} } qw(cid language disposition name);
-        last;
-      }
-      if ($part->{blobId} && $getblob) {
-        my ($type, $content) = $getblob->($part->{blobId});
-        $htmlContent = $content;
-        %htmlMeta = map { $_ => $part->{$_} } grep { defined $part->{$_} } qw(cid language disposition name);
-        last;
-      }
-    }
-  }
+    return undef;
+  };
 
   # Note: do NOT auto-generate text/plain from HTML. Per RFC 8621,
   # if only htmlBody is provided, the server creates a single text/html
   # part that appears in both textBody and htmlBody of the response.
   # Generating a multipart/alternative would change the structure.
 
-  # Build MIME parts
   my $MIME;
-  my $textpart;
-  my $htmlpart;
-
-  if (defined $textContent) {
-    my $charset = ($textContent =~ /[^\x{00}-\x{7f}]/) ? 'UTF-8' : 'us-ascii';
-    my %attrs = (content_type => 'text/plain', charset => $charset);
-    $attrs{disposition} = $textMeta{disposition} if $textMeta{disposition};
-    $attrs{filename} = $textMeta{name} if $textMeta{name};
-    $attrs{name} = $textMeta{name} if $textMeta{name};
-    $textpart = Email::MIME->create(
-      attributes => \%attrs,
-      body => $charset eq 'UTF-8' ? Encode::encode_utf8($textContent) : $textContent,
-    );
-    if ($textMeta{cid}) {
-      _valid_cid($textMeta{cid});
-      $textpart->header_str_set('Content-ID' => "<$textMeta{cid}>");
-    }
-    if ($textMeta{language} && ref($textMeta{language}) eq 'ARRAY') {
-      $textpart->header_str_set('Content-Language' => join(', ', @{$textMeta{language}}));
-    }
+  my ($textpart, $htmlpart);
+  if (my $part = $first_with_content->($args->{textBody})) {
+    $textpart = _leaf_part({ %$part, type => 'text/plain' }, $bodyValues, $getblob, headers => 0);
   }
-
-  if (defined $htmlContent) {
-    my $charset = ($htmlContent =~ /[^\x{00}-\x{7f}]/) ? 'UTF-8' : 'us-ascii';
-    my %attrs = (content_type => 'text/html', charset => $charset);
-    $attrs{disposition} = $htmlMeta{disposition} if $htmlMeta{disposition};
-    $attrs{filename} = $htmlMeta{name} if $htmlMeta{name};
-    $attrs{name} = $htmlMeta{name} if $htmlMeta{name};
-    $htmlpart = Email::MIME->create(
-      attributes => \%attrs,
-      body => $charset eq 'UTF-8' ? Encode::encode_utf8($htmlContent) : $htmlContent,
-    );
-    if ($htmlMeta{cid}) {
-      _valid_cid($htmlMeta{cid});
-      $htmlpart->header_str_set('Content-ID' => "<$htmlMeta{cid}>");
-    }
-    if ($htmlMeta{language} && ref($htmlMeta{language}) eq 'ARRAY') {
-      $htmlpart->header_str_set('Content-Language' => join(', ', @{$htmlMeta{language}}));
-    }
+  if (my $part = $first_with_content->($args->{htmlBody})) {
+    $htmlpart = _leaf_part({ %$part, type => 'text/html' }, $bodyValues, $getblob, headers => 0);
   }
 
   my @attparts;
   if ($args->{attachments} && ref($args->{attachments}) eq 'ARRAY') {
     for my $att (@{$args->{attachments}}) {
-      if ($att->{partId} && $bodyValues->{$att->{partId}}) {
-        # Content from bodyValues
-        my $content = $bodyValues->{$att->{partId}}{value} // '';
-        my $disp = $att->{disposition} || 'attachment';
-        my %attrs = (
-          content_type => $att->{type} || 'application/octet-stream',
-          disposition => $disp,
-        );
-        $attrs{filename} = $att->{name} if $att->{name};
-        $attrs{name} = $att->{name} if $att->{name};
-        $attrs{encoding} = _detect_encoding($content, $attrs{content_type});
-        my $part = Email::MIME->create(attributes => \%attrs, body => $content);
-        if ($att->{cid}) {
-          _valid_cid($att->{cid});
-          $part->header_str_set('Content-ID' => "<$att->{cid}>");
-        }
-        $part->header_str_set('Content-Language' => join(', ', @{$att->{language}}))
-          if $att->{language} && ref($att->{language}) eq 'ARRAY';
-        push @attparts, $part;
-      }
-      elsif ($att->{blobId} && $getblob) {
-        push @attparts, _makeatt($att, $getblob);
-      }
+      next unless (defined $att->{partId} && $bodyValues->{$att->{partId}})
+               || ($att->{blobId} && $getblob);
+      push @attparts, _leaf_part($att, $bodyValues, $getblob,
+        disposition => ($att->{isInline} ? 'inline' : 'attachment'));
     }
   }
 

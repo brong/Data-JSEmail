@@ -29,6 +29,17 @@ Revision history for Perl extension Data::JSEmail
 	  like header:{name}:as{form} (last instance, decoded once), and
 	  address names are decoded once (they were decoded by Email::MIME,
 	  then again by asText); add t/header-codec.t
+	- make: one leaf-part encoder for bodyStructure leaves and for the
+	  textBody, htmlBody and attachments shorthand.  It fixes: a non-text
+	  blob leaf in bodyStructure written raw with no
+	  Content-Transfer-Encoding, so the final CRLF rewrite corrupted
+	  binary octets (now base64); a textBody or text leaf given by blobId
+	  UTF-8 encoded a second time (blob octets are now written as they
+	  are, with the charset given, or the blob type's, or us-ascii/UTF-8
+	  when the octets are); a bodyValues attachment with non-ASCII text
+	  dying "Wide character"; text lines over 998 octets written 7bit
+	  (now quoted-printable).  header:* properties on a shorthand
+	  attachment are now written on it
 
 0.05  2026-11-07
 	- flag an unknown Content-Transfer-Encoding as an encoding problem

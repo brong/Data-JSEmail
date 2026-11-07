@@ -15,6 +15,7 @@ use lib 'lib', 't/lib';
 use JSEmailTest qw(part_ids leaves leaf_by_id prop_value blob_store hdr);
 use Data::JSEmail;
 use Email::MIME;
+use Encode ();
 
 binmode(Test::More->builder->$_, ':encoding(UTF-8)') for qw(output failure_output todo_output);
 
@@ -207,7 +208,6 @@ sub value_of {
 
 {
   my ($raw, $m) = rt({ textBody => [ { blobId => 'utf8', type => 'text/plain' } ] });
-  local $TODO = 'blob octets are treated as characters and UTF-8 encoded again (lib lines 925-927, 962-969)';
   is(value_of($m, $m->{textBody}[0]), "Grüße aus München\n", 'textBody by blobId: UTF-8 text round-trips');
 }
 
@@ -219,7 +219,6 @@ sub value_of {
     textBody    => [ { partId => 1 } ],
     attachments => [ { partId => 2, type => 'text/plain', name => 'notes.txt' } ],
   });
-  local $TODO = 'a bodyValues attachment is passed to Email::MIME as characters, not encoded (lib lines 1004-1013)';
   ok($m, 'attachment by partId: made') or diag $err;
   my ($att) = @{ $m ? $m->{attachments} : [] };
   is(value_of($m, $att), "naïve € notes\n", 'attachment by partId: non-ASCII value round-trips');
@@ -282,7 +281,6 @@ sub value_of {
   is_deeply(part_ids($m->{htmlBody}), ['1.2.1'], 'bodyStructure: htmlBody');
   is_deeply(part_ids($m->{attachments}), ['1.2.2', '2'], 'bodyStructure: attachments');
   {
-    local $TODO = 'a non-text blob leaf gets no Content-Transfer-Encoding, so raw binary goes out and the LF-to-CRLF rewrite mangles it (lib lines 760-763, 906)';
     is(part_octets($raw, '2'), $PDF, 'bodyStructure: pdf octets round-trip');
     is(part_octets($raw, '1.2.2'), $PNG, 'bodyStructure: binary image octets round-trip');
     is(leaf_by_id($m, '1.2.2')->{size}, length $PNG, 'bodyStructure: binary image size');
@@ -297,7 +295,6 @@ sub value_of {
     ] },
   });
   {
-    local $TODO = 'blob octets are treated as characters and UTF-8 encoded again (lib lines 746-758)';
     is(value_of($m, leaf_by_id($m, '1')), "Grüße aus München\n", 'bodyStructure: text leaf by blobId round-trips');
   }
   {
@@ -313,6 +310,42 @@ sub value_of {
   my $raw = Data::JSEmail::make({ bodyStructure => { type => 'text/plain', blobId => 'l1', charset => 'iso-8859-1' } }, $latin1);
   my $m = Data::JSEmail::parse($raw);
   is($m->{bodyValues}{1}{value}, "Grüße\n", 'bodyStructure: ISO-8859-1 blob with its charset reads back as text');
+}
+
+# --- the leaf-part encoder: every kind of content, every list --------------
+
+{
+  my $long = ('x' x 1200) . "\n";
+  my $msg  = "Subject: inner\r\nFrom: a\@example.com\r\n\r\nInner body \xc3\xa9\r\n";
+  my $store = blob_store(
+    png   => [ 'image/png', $PNG ],
+    l1    => [ 'text/plain; charset=iso-8859-1', "caf\xe9\n" ],
+    junk  => [ 'text/plain', "caf\xe9\n" ],
+    long  => [ 'text/plain', $long ],
+    msg   => [ 'message/rfc822', $msg ],
+  );
+  my $raw = Data::JSEmail::make({
+    bodyValues  => { 1 => { value => "body\n" }, j => { value => qq{{"k":"vä€"}} } },
+    textBody    => [ { partId => 1 } ],
+    attachments => [
+      { blobId => 'png', type => 'image/png', name => 'a.png' },
+      { blobId => 'l1', type => 'text/plain', name => 'l1.txt' },
+      { blobId => 'junk', type => 'text/plain', name => 'junk.txt' },
+      { blobId => 'long', type => 'text/plain', name => 'long.txt' },
+      { blobId => 'msg', type => 'message/rfc822' },
+      { partId => 'j', type => 'application/json', name => 'v.json' },
+    ],
+  }, $store);
+  my $m = Data::JSEmail::parse($raw);
+  my %att = map { ($_->{name} // $_->{type}) => $_ } @{ $m->{attachments} };
+  is(part_octets($raw, $att{'a.png'}{partId}), $PNG, 'leaf encoder: binary attachment octets round-trip');
+  is($m->{bodyValues}{ $att{'l1.txt'}{partId} }{value}, "café\n", 'leaf encoder: the blob type gives the charset');
+  ok(defined $att{'junk.txt'}, 'leaf encoder: a text blob in no known charset is still written');
+  is(part_octets($raw, $att{'long.txt'}{partId}), $long =~ s/\n/\r\n/r, 'leaf encoder: a line over 998 octets survives (quoted-printable)');
+  ok(!grep({ length > 998 } split /\r\n/, $raw), 'leaf encoder: no line over 998 octets');
+  is(part_octets($raw, $att{'message/rfc822'}{partId}), $msg, 'leaf encoder: message/rfc822 octets round-trip');
+  is(part_octets($raw, $att{'v.json'}{partId}), Encode::encode('UTF-8', qq{{"k":"vä€"}}),
+    'leaf encoder: a non-text bodyValues part is its UTF-8 octets');
 }
 
 # --- header:{name} values on create ---------------------------------------
