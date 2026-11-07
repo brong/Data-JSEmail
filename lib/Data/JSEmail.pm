@@ -244,6 +244,22 @@ sub asText {
   return $res;
 }
 
+# An addr-spec as JMAP reports it: RFC 6532 lets the local part and domain
+# be UTF-8, which arrives as octets and must become characters (or it is
+# encoded a second time on output); the domain is lower-cased. Octets that
+# are not UTF-8 are left as they are.
+sub _addr_spec {
+  my ($email) = @_;
+  return $email unless defined $email;
+  if ($email =~ /[\x80-\xff]/ && $email !~ /[^\x00-\xff]/) {
+    my $copy = $email;
+    my $chars = eval { Encode::decode('UTF-8', $copy, Encode::FB_CROAK) };
+    $email = NFC($chars) if defined $chars;
+  }
+  $email =~ s/\@(.*)/"@" . lc($1)/e;
+  return $email;
+}
+
 sub asAddresses {
   my $emails = shift;
 
@@ -268,8 +284,7 @@ sub asGroupedAddresses {
     my @addresses;
     foreach my $addr (@$list) {
       my $name = $addr->phrase();
-      my $email = $addr->address();
-      $email =~ s/\@(.*)/"@" . lc($1)/e if $email;
+      my $email = _addr_spec($addr->address());
       push @addresses, {
         name => asText($name),
         email => $email,
@@ -303,8 +318,7 @@ sub asGroupAddresses {
     }
     foreach my $addr (@$list) {
       my $name = $addr->phrase();
-      my $email = $addr->address();
-      $email =~ s/\@(.*)/"@" . lc($1)/e;
+      my $email = _addr_spec($addr->address());
       push @res, {
         name => asText($name),
         email => $email,
