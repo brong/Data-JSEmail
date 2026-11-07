@@ -1,5 +1,16 @@
 Revision history for Perl extension Data::JSEmail
 
+0.05  2026-11-07
+	- flag an unknown Content-Transfer-Encoding as an encoding problem
+	  (RFC 8621 S4.1.4): it came back undecoded and unflagged
+	- make: keep mailboxes whose email has no '@' (RFC 8621 S4.1.2.3);
+	  Email::MIME dropped them, leaving an empty From:, To:, ...
+	- escape '"' and '\' in a display name; a name with a quote made a
+	  broken header
+	- asAddresses/asGroupedAddresses: decode a UTF-8 addr-spec once
+	  (RFC 6532); it was written out double-encoded
+	- add t/encoding-problem.t, t/bare-addresses.t, t/eai-addresses.t
+
 0.04  2026-08-31
 	- clarify licensing: same terms as Perl itself (Artistic License 1.0
 	  or GPL version 1 or later)
