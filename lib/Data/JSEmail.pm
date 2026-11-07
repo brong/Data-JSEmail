@@ -53,7 +53,7 @@ sub parse { _with_settings(\&_parse, @_) }
 sub _parse {
   my $rfc822 = shift;
   my $id = shift || Digest::SHA::sha256_hex($rfc822);
-  my $eml = Email::MIME->new($rfc822);
+  my $eml = Data::JSEmail::MIMEPart->new($rfc822);
   my $res = _parse_email($id, $eml);
   $res->{size} = length($rfc822);
   return $res;
@@ -120,7 +120,12 @@ sub bodystructure {
   if (@parts) {
     my @sub;
     for (my $n = 1; $n <= @parts; $n++) {
-      push @sub, bodystructure($values, $id, $parts[$n-1], $partno ? "$partno.$n" : $n);
+      my $subno = $partno ? "$partno.$n" : $n;
+      # One part that cannot be read must not cost the reader the rest
+      # of the message: it becomes an opaque leaf.
+      my $node = eval { bodystructure($values, $id, $parts[$n-1], $subno) };
+      $node //= _opaque_leaf($id, $parts[$n-1], $subno);
+      push @sub, $node;
     }
     return {
       partId => undef,
@@ -145,6 +150,12 @@ sub bodystructure {
       $disposition = parse_content_disposition($val);
     }
     $partno ||= '1';
+    # A multipart that yielded no parts (its boundary never appears, or
+    # it is nested or split past Email::MIME's limits) is kept whole as
+    # one opaque leaf: a part with a multipart type must have subParts
+    # (RFC 8621 S4.1.4), and this one's content cannot be split into any.
+    $type = { type => 'application', subtype => 'octet-stream', attributes => {} }
+      if lc $type->{type} eq 'multipart';
     my $body = $eml->body();
     my $raw_size = length($body); # size in octets of decoded content
     if ($type->{type} eq 'text') {
@@ -188,6 +199,25 @@ sub bodystructure {
       disposition => $disposition->{type},
     };
   }
+}
+
+# The leaf a part that could not be read at all is reported as.
+sub _opaque_leaf {
+  my ($id, $eml, $partno) = @_;
+  my $raw = eval { $eml->body_raw } // '';
+  return {
+    partId => "$partno",
+    blobId => "m-$id-$partno",
+    type => 'application/octet-stream',
+    size => length($raw),
+    headers => (eval { headers($eml) } || []),
+    name => undef,
+    cid => undef,
+    charset => undef,
+    language => undef,
+    location => undef,
+    disposition => undef,
+  };
 }
 
 sub asDate {
@@ -422,7 +452,7 @@ sub preview {
     return make_preview(htmltotext($text));
   }
   foreach my $sub ($eml->subparts()) {
-    my $res = preview($sub);
+    my $res = eval { preview($sub) };
     return $res if $res;
   }
   return undef;
@@ -466,8 +496,8 @@ sub parseStructure {
 
   for (my $i = 0; $i < @$parts; $i++) {
     my $part = $parts->[$i];
-    my $isMultipart = $part->{type} =~ m{^multipart/(.*)};
-    my $subMultiType = $isMultipart ? $1 : '';
+    my $isMultipart = $part->{subParts} ? 1 : 0;
+    my $subMultiType = $isMultipart && $part->{type} =~ m{^multipart/(.*)}i ? lc $1 : '';
 
     # Determine part type (matching Cyrus classification)
     my $isPlain = $part->{type} eq 'text/plain'
@@ -1096,6 +1126,28 @@ sub _make {
 
   return $res;
 }
+
+# Email::MIME, made to degrade one part instead of the whole message.
+# Email::MIME splits every multipart while it is constructed, and dies
+# (attempting the whole parse) when a part is nested deeper than
+# $Email::MIME::MAX_DEPTH or the message has more than $MAX_PARTS parts.
+# Here the part where that happens is kept whole as a single part, with
+# its body intact, and every other part parses as before.  Subparts are
+# made with ref($self)->_new, so the whole tree is of this class.
+package Data::JSEmail::MIMEPart;
+our @ISA = ('Email::MIME');
+
+sub parts_multipart {
+  my $self = shift;
+  my $body = $self->Email::Simple::body;
+  my @parts = eval { $self->SUPER::parts_multipart(@_) };
+  return @parts unless $@;
+  $self->Email::Simple::body_set($body);
+  delete $self->{body_raw};
+  return $self->parts_single_part;
+}
+
+package Data::JSEmail;
 
 sub isodate {
   my $epoch = shift || time();

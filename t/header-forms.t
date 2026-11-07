@@ -208,7 +208,7 @@ my %convenience = (
 );
 opendir my $dh, 't/data' or die $!;
 for my $file (sort grep { /\.eml$/ } readdir $dh) {
-  my $m = eval { parse_fixture($file) } or next;   # bad-boundary.eml: see t/corpus.t
+  my $m = parse_fixture($file);
   for my $prop (sort keys %convenience) {
     is_deeply($m->{$prop}, prop_value($m->{headers}, $convenience{$prop}),
       "$file: $prop is $convenience{$prop}");

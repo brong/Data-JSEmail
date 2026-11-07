@@ -5,6 +5,11 @@ Revision history for Perl extension Data::JSEmail
 	  Email::MIME globals the module is written against (STRICT_PARAMS
 	  0, PRE_2231_FORM 1, GROUCHY 0) localised, so results no longer
 	  depend on what the caller set; add t/globals.t
+	- parse never dies on malformed MIME: a multipart whose boundary
+	  never appears, or one nested or split past Email::MIME's
+	  MAX_DEPTH/MAX_PARTS, becomes one application/octet-stream leaf
+	  holding its content, and a part that cannot be read is an opaque
+	  leaf; the rest of the message parses as before
 
 0.05  2026-11-07
 	- flag an unknown Content-Transfer-Encoding as an encoding problem

@@ -260,10 +260,47 @@ for my $file (sort keys %corpus) {
 {
   my $m = eval { parse_fixture('bad-boundary.eml') };
   my $err = $@;
-  local $TODO = 'a multipart with no parts is made a leaf, then parseStructure recurses into its undef subParts (lib lines 97-118, 463-464)';
   ok($m, 'bad-boundary.eml: parses') or diag $err;
   is(ref($m && $m->{textBody}), 'ARRAY', 'bad-boundary.eml: has a textBody list');
+  is($m->{subject}, 'Boundary never appears', 'bad-boundary.eml: the headers are still read');
+  # The multipart cannot be split, so its content is kept whole as one
+  # opaque leaf: a multipart type with no subParts is not allowed.
+  is($m->{bodyStructure}{type}, 'application/octet-stream', 'bad-boundary.eml: unsplittable multipart is an opaque leaf');
+  is($m->{bodyStructure}{partId}, '1', 'bad-boundary.eml: the leaf has a partId');
+  is_deeply(part_ids($m->{attachments}), ['1'], 'bad-boundary.eml: and is an attachment');
+  check_invariants('bad-boundary.eml', $m) if $m;
 }
+
+# Malformed MIME degrades the part it is in, not the message.
+sub nested {
+  my ($depth) = @_;
+  return "Content-Type: text/plain\r\n\r\ndeep text\r\n" unless $depth;
+  my $b = "b$depth";
+  return "Content-Type: multipart/mixed; boundary=$b\r\n\r\n"
+    . "--$b\r\nContent-Type: text/plain\r\n\r\nlevel $depth\r\n"
+    . "--$b\r\n" . nested($depth - 1) . "--$b--\r\n";
+}
+{
+  # Email::MIME dies on nesting deeper than $Email::MIME::MAX_DEPTH (10).
+  my $raw = "From: a\@example.com\r\nSubject: deep\r\n" . nested(15);
+  my $m = eval { Data::JSEmail::parse($raw, 'deep') };
+  ok($m, 'deep nesting: parses') or diag $@;
+  is($m && $m->{subject}, 'deep', 'deep nesting: headers read');
+  is($m && value_of_id($m, q{1}), "level 15", 'deep nesting: the shallow parts are read');
+  my @opaque = $m ? grep { $_->{type} eq 'application/octet-stream' } leaves($m->{bodyStructure}) : ();
+  is(scalar @opaque, 1, 'deep nesting: only the part past the limit is opaque');
+  check_invariants('deep nesting', $m) if $m;
+}
+{
+  # ... and on a message of more than $Email::MIME::MAX_PARTS (100) parts.
+  my $raw = "From: a\@example.com\r\nSubject: wide\r\nContent-Type: multipart/mixed; boundary=w\r\n\r\n"
+    . join('', map { "--w\r\nContent-Type: text/plain\r\n\r\npart $_\r\n" } 1 .. 150) . "--w--\r\n";
+  my $m = eval { Data::JSEmail::parse($raw, 'wide') };
+  ok($m, 'too many parts: parses') or diag $@;
+  is($m && $m->{subject}, 'wide', 'too many parts: headers read');
+  like($m && $m->{bodyStructure}{size}, qr/^[1-9]/, 'too many parts: the content is kept');
+}
+sub value_of_id { my ($m, $id) = @_; my $v = $m->{bodyValues}{$id}; $v && $v->{value} }
 
 is_deeply(\@warnings, [], 'no warnings');
 
