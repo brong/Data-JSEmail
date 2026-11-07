@@ -12,6 +12,7 @@ t/corpus.t
 t/header-forms.t
 t/roundtrip.t
 t/globals.t
+t/header-codec.t
 t/lib/JSEmailTest.pm
 t/data/alternative-html-only.eml
 t/data/alternative.eml

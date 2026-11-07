@@ -123,7 +123,6 @@ sub value_of {
   });
   is(prop_value($m->{headers}, 'header:Subject:asText'), 'About =?UTF-8?Q?x?= syntax',
     'encoded-word-looking subject: header:Subject:asText round-trips');
-  local $TODO = 'subject is parsed from Email::MIME header(), already decoded, then decoded again (lib line 66)';
   is($m->{subject}, 'About =?UTF-8?Q?x?= syntax', 'encoded-word-looking subject: subject round-trips');
 }
 
@@ -135,7 +134,6 @@ sub value_of {
     bodyValues => { 1 => { value => "x\n" } },
     textBody   => [ { partId => 1 } ],
   });
-  local $TODO = 'sentAt is written into Date: verbatim, in RFC 3339 form (lib line 838)';
   is($m->{sentAt}, '2026-11-07T10:00:00+11:00', 'sentAt round-trips');
 }
 
@@ -338,13 +336,11 @@ sub value_of {
     bodyValues => { 1 => { value => "x\n" } },
     textBody   => [ { partId => 1 } ],
   });
-  local $TODO = 'a Raw value goes through header_str_set, which RFC 2047-encodes one with a leading space (lib line 547)';
   is(prop_value($m->{headers}, 'header:X-Raw'), ' raw  value', 'header:X-Raw: Raw value written as given');
 }
 
-# The typed forms (S4.1.3 header:{name}:as{form}[:all]) on create.  The
-# proxy converts them to Raw itself (JMAP/DB.pm _convert_header_forms)
-# before calling make; make should take them directly.
+# The typed forms (S4.1.3 header:{name}:as{form}[:all]) on create, which
+# make takes directly (format_header writes each).
 my @typed = (
   [ 'header:X-Text:asText'                => 'Grüße, world',                                   'Grüße, world' ],
   [ 'header:X-Addrs:asAddresses'          => [ { name => 'A "q" B', email => 'ab@example.com' }, { name => undef, email => 'c@example.com' } ] ],
@@ -362,7 +358,6 @@ for my $t (@typed) {
     bodyValues => { 1 => { value => "x\n" } },
     textBody   => [ { partId => 1 } ],
   });
-  local $TODO = 'make() takes header:Name:asForm as a literal field name; only the proxy converts typed forms (JMAP/DB.pm _convert_header_value)';
   is_deeply($m ? prop_value($m->{headers}, $prop) : "died: $err", $value, "$prop round-trips");
 }
 

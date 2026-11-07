@@ -12,8 +12,6 @@ use JSON::XS;
 use HTML::Strip;
 use Email::MIME;
 use Email::MIME::ContentType;
-use Email::MIME::Header::AddressList;
-use Email::MIME::Encode;
 use Email::Address::XS;
 use Encode;
 use Encode::MIME::Header;
@@ -77,19 +75,26 @@ sub _parse_email {
   parseStructure([$bodystructure], 'mixed', 0, $textBody, $htmlBody, $attachments);
 
   my ($hasAtt) = grep { ($_->{disposition} // '') ne 'inline' } @$attachments;
+
+  # S4.1.3: each convenience property is its header:{name}:as{form}, so
+  # it is computed from the same Raw values (Email::MIME's header() has
+  # already decoded them, and returns the first instance, not the last).
+  my %raw;
+  push @{ $raw{ lc $_->{name} } }, $_->{value} for @$headers;
+  my $hv = sub { my ($form, $name) = @_; header_value($form, $raw{ lc $name } || []) };
   my $data = {
     id => $id,
-    sender => asAddresses($eml->header('Sender')),
-    to => asAddresses($eml->header('To')),
-    cc => asAddresses($eml->header('Cc')),
-    bcc => asAddresses($eml->header('Bcc')),
-    from => asAddresses($eml->header('From')),
-    replyTo => asAddresses($eml->header('Reply-To')),
-    subject => asText($eml->header('Subject')),
-    sentAt => asDate($eml->header('Date')),
-    messageId => asMessageIds($eml->header('Message-Id')),
-    references => asMessageIds($eml->header('References')),
-    inReplyTo => asMessageIds($eml->header('In-Reply-To')),
+    sender => $hv->(asAddresses => 'Sender'),
+    to => $hv->(asAddresses => 'To'),
+    cc => $hv->(asAddresses => 'Cc'),
+    bcc => $hv->(asAddresses => 'Bcc'),
+    from => $hv->(asAddresses => 'From'),
+    replyTo => $hv->(asAddresses => 'Reply-To'),
+    subject => $hv->(asText => 'Subject'),
+    sentAt => $hv->(asDate => 'Date'),
+    messageId => $hv->(asMessageIds => 'Message-Id'),
+    references => $hv->(asMessageIds => 'References'),
+    inReplyTo => $hv->(asMessageIds => 'In-Reply-To'),
     preview => $preview,
     hasAttachment => $hasAtt ? $JSON::true : $JSON::false,
     headers => $headers,
@@ -312,6 +317,15 @@ sub _addr_spec {
   return $email;
 }
 
+# The (group, [mailbox...]) pairs of an address-list Raw value, with the
+# phrases still encoded: asText decodes them, once.  (Email::MIME's
+# from_mime_string decodes them first, so they were decoded twice.)
+sub _address_groups {
+  my $raw = shift;
+  my @groups = eval { Email::Address::XS::parse_email_groups($raw) };
+  return $@ ? undef : \@groups;
+}
+
 sub asAddresses {
   my $emails = shift;
 
@@ -326,9 +340,8 @@ sub asGroupedAddresses {
   # RFC 8621: returns EmailAddressGroup[] — [{name, addresses}]
   my $emails = shift;
   return undef unless defined $emails;
-  my $addrs = eval { Email::MIME::Header::AddressList->from_mime_string($emails) };
-  return undef unless $addrs;
-  my @addrs = $addrs->groups();
+  my $groups = _address_groups($emails) or return undef;
+  my @addrs = @$groups;
   my @res;
   while (@addrs) {
     my $group = shift @addrs;
@@ -355,9 +368,8 @@ sub asGroupAddresses {
   my $emails = shift;
 
   return undef unless defined $emails;
-  my $addrs = eval { Email::MIME::Header::AddressList->from_mime_string($emails) };
-  return undef unless $addrs;
-  my @addrs = $addrs->groups();
+  my $groups = _address_groups($emails) or return undef;
+  my @addrs = @$groups;
   my @res;
   while (@addrs) {
     my $group = shift @addrs;
@@ -564,111 +576,285 @@ sub parseStructure {
   }
 }
 
-sub _mkone {
-  my $h = shift;
-  my $email = $h->{email};
-  my $name = $h->{name};
-  if (defined $name && $name ne '') {
-    (my $quoted = $name) =~ s/(["\\])/\\$1/g;
-    return qq{"$quoted" <$email>};
-  }
-  else {
-    return $email;
-  }
+# --- header forms (RFC 8621 S4.1.2, S4.1.3) --------------------------------
+#
+# One codec for the parsed header forms, used in both directions: the
+# get side (header_value) reads the Raw value of each instance, and the
+# create side (format_header) writes a Raw value that header_value reads
+# back as what was given.  make() and parse() use these for every header
+# they read or write, the convenience properties included.
+
+my %GET_FORM = (
+  asRaw              => sub { $_[0] },
+  asText             => \&asText,
+  asAddresses        => \&asAddresses,
+  asGroupedAddresses => \&asGroupedAddresses,
+  asMessageIds       => \&asMessageIds,
+  asDate             => \&asDate,
+  asURLs             => \&asURLs,
+);
+
+sub _form_name {
+  my $form = shift;
+  return 'asRaw' if !defined $form || $form eq '' || $form eq 'Raw';
+  return $form;
 }
 
-# Set a header from Perl character strings.  Email::MIME does the
-# encoding, except for an address-list header holding a mailbox it
-# cannot parse as an addr-spec (no '@', say): Email::MIME drops such a
-# mailbox, so "From: user1" would come out as an empty From:.  RFC 8621
-# S4.1.2.3 lets an EmailAddress "email" lack the '@', and S4.6 lets the
-# message of a draft be invalid per RFC 5322 (it is checked when it is
-# submitted), so such a header is written as given instead.
-sub _header_set {
-  my ($mime, $name, @vals) = @_;
-  if (_is_address_header($name)) {
-    my @raw = map { _encode_lossy_addresses($_) } @vals;
-    if (grep { defined } @raw) {
-      my @enc = map {
-        defined $raw[$_] ? $raw[$_]
-          : Email::MIME::Encode::maybe_mime_encode_header($name, $vals[$_], 'UTF-8')
-      } 0 .. $#vals;
-      return $mime->header_raw_set($name => @enc);
-    }
-  }
-  return $mime->header_str_set($name => @vals);
+sub header_value {
+  my ($form, $raw_values, %opt) = @_;
+  $form = _form_name($form);
+  my $conv = $GET_FORM{$form} or die "Unknown header form '$form'\n";
+  my @values = grep { defined } (ref $raw_values eq 'ARRAY' ? @$raw_values : ($raw_values));
+  return [ map { $conv->($_) } @values ] if $opt{all};
+  return @values ? $conv->($values[-1]) : undef;
 }
 
-sub _is_address_header {
-  my $name = lc shift;
-  my $class = $Email::MIME::Header::header_to_class_map{$name} // '';
-  return $class eq 'Email::MIME::Header::AddressList';
+sub header_property {
+  my ($headers, $prop) = @_;
+  my ($name, $form, $all) = parse_header_property($prop)
+    or die "Invalid header property '$prop'\n";
+  my @values = map { $_->{value} }
+               grep { lc($_->{name} // '') eq lc $name } @{ $headers || [] };
+  return header_value($form, \@values, all => $all);
+}
+
+sub parse_header_property {
+  my $prop = shift;
+  return () unless defined $prop
+    && $prop =~ /\Aheader:([\x21-\x39\x3b-\x7e]+?)(?::(as[A-Za-z]+))?(:all)?\z/;
+  my ($name, $form, $all) = ($1, _form_name($2), $3 ? 1 : 0);
+  return () unless $GET_FORM{$form};
+  return ($name, $form, $all);
+}
+
+# RFC 8621 S4.1.2: the header fields each parsed form may be used on.
+# A field not defined in RFC 5322 or RFC 2369 may use every form.
+my %FORM_FIELDS = (
+  asText       => [qw(subject comments keywords list-id)],
+  asAddresses  => [qw(from sender reply-to to cc bcc resent-from resent-sender
+                      resent-reply-to resent-to resent-cc resent-bcc)],
+  asMessageIds => [qw(message-id in-reply-to references resent-message-id)],
+  asDate       => [qw(date resent-date)],
+  asURLs       => [qw(list-help list-unsubscribe list-subscribe list-post
+                      list-owner list-archive)],
+);
+$FORM_FIELDS{asGroupedAddresses} = $FORM_FIELDS{asAddresses};
+my %FORM_ALLOWED = map { my $f = $_; ($f => { map { $_ => 1 } @{ $FORM_FIELDS{$f} } }) } keys %FORM_FIELDS;
+my %DEFINED_FIELD = map { $_ => 1 } qw(
+  date from sender reply-to to cc bcc message-id in-reply-to references subject
+  comments keywords resent-date resent-from resent-sender resent-to resent-cc
+  resent-bcc resent-message-id return-path received
+  list-help list-unsubscribe list-subscribe list-post list-owner list-archive
+);
+
+sub header_form_allowed {
+  my ($field, $form) = @_;
+  $form = _form_name($form);
+  return 0 unless $GET_FORM{$form};
+  return 1 if $form eq 'asRaw';
+  return 1 unless $DEFINED_FIELD{ lc($field // '') };
+  return $FORM_ALLOWED{$form}{ lc $field } ? 1 : 0;
+}
+
+my %SET_FORM = (
+  asRaw              => \&_fmt_raw,
+  asText             => \&_fmt_text,
+  asAddresses        => \&_fmt_addresses,
+  asGroupedAddresses => \&_fmt_grouped,
+  asMessageIds       => \&_fmt_msgids,
+  asDate             => \&_fmt_date,
+  asURLs             => \&_fmt_urls,
+);
+
+sub format_header {
+  my ($form, $value) = @_;
+  $form = _form_name($form);
+  my $fmt = $SET_FORM{$form} or die "Unknown header form '$form'\n";
+  return undef unless defined $value;
+  my $res = $fmt->($value);
+  return undef unless defined $res;
+  return $res if $form eq 'asRaw';
+  return " $res";
+}
+
+sub _bad { my ($form, $why) = @_; die "Invalid $form header value: $why\n" }
+
+sub _fmt_raw {
+  my $v = shift;
+  _bad(asRaw => 'not a string') if ref $v;
+  _bad(asRaw => 'NUL') if $v =~ /\0/;
+  # A line break is only allowed as a fold: CRLF then whitespace.
+  (my $t = $v) =~ s/\r?\n(?=[ \t])//g;
+  _bad(asRaw => 'line break that is not a fold') if $t =~ /[\r\n]/;
+  return $v;
 }
 
 my $ATEXT = qr{[A-Za-z0-9!#\$%&'*+/=?^_`{|}~-]};
 
-# A phrase (display-name or group name): as-is if it is atoms, an
-# RFC 2047 encoded-word if it is not ASCII, else a quoted-string.
-sub _encode_phrase {
+# RFC 2047 encoded-words for text that cannot go in a header as it is:
+# non-ASCII, control characters (a line break would end the header), or
+# something a reader would take for an encoded-word.
+sub _needs_encoding { $_[0] =~ /[^\x20-\x7e\t]|=\?/ }
+
+sub _encode_words {
+  my $text = shift;
+  my $enc = Encode::encode('MIME-Q', $text);
+  $enc =~ s/\r?\n(?=[ \t])/\r\n/g;
+  return $enc;
+}
+
+sub _fmt_text {
+  my $v = shift;
+  _bad(asText => 'not a string') if ref $v;
+  $v =~ s/[\r\n]+/ /g;    # a header field cannot hold a line break
+  return _needs_encoding($v) ? _encode_words($v) : $v;
+}
+
+# A phrase (display-name or group name): as-is if it is atoms, RFC 2047
+# encoded-words if it needs them, else a quoted-string.
+sub _fmt_phrase {
   my $phrase = shift;
+  return _encode_words($phrase) if _needs_encoding($phrase);
   return $phrase if $phrase =~ m{\A$ATEXT+(?: $ATEXT+)*\z};
-  if ($phrase =~ /[^\x00-\x7f]/) {
-    my $enc = Encode::encode('MIME-Q', $phrase);
-    $enc =~ s/\r?\n//g;
-    return $enc;
-  }
   (my $q = $phrase) =~ s/(["\\])/\\$1/g;
   return qq{"$q"};
 }
 
-# Returns undef when Email::MIME will encode $val without loss (every
-# mailbox in it is a valid addr-spec), else the header value with each
-# mailbox Email::MIME would drop written as given.
-sub _encode_lossy_addresses {
-  my $val = shift;
-  return undef unless defined $val && $val =~ /\S/;
-  my @groups = Email::Address::XS::parse_email_groups($val);
-  return undef unless grep { !$_->is_valid } map { @{$groups[$_]} } grep { $_ % 2 } 0 .. $#groups;
+# An addr-spec.  RFC 8621 S4.1.2.3 lets "email" lack the '@' (and S4.6
+# lets a draft be invalid), so such a value is written as given; a local
+# part that is not a dot-atom is quoted.  RFC 6532 UTF-8 is kept.
+sub _fmt_addr_spec {
+  my $email = shift;
+  _bad(asAddresses => 'email is not a string') if !defined $email || ref $email;
+  $email =~ s/[\r\n]+/ /g;    # nothing in it may end the header line
+  _bad(asAddresses => "email '$email' has control characters") if $email =~ /[\x00-\x1f\x7f]/;
+  my ($local, $domain) = $email =~ /\A(.*)\@([^@]*)\z/s ? ($1, $2) : ($email, undef);
+  my $atom = qr{(?:$ATEXT|[^\x00-\x7f])+};
+  if ($local !~ /\A"(?:[^"\\]|\\.)*"\z/ && $local !~ /\A$atom(?:\.$atom)*\z/) {
+    $local =~ s/(["\\])/\\$1/g;
+    $local = qq{"$local"};
+  }
+  if (defined $domain) {
+    _bad(asAddresses => "bad domain in '$email'")
+      if $domain !~ /\A\[[^\[\]\\]*\]\z/ && $domain =~ /[\s<>()\[\],;:\\"]/;
+    return "$local\@$domain";
+  }
+  return $local;
+}
 
+sub _fmt_mailbox {
+  my $a = shift;
+  _bad(asAddresses => 'not an EmailAddress') unless ref $a eq 'HASH';
+  my $spec = _fmt_addr_spec($a->{email});
+  my $name = $a->{name};
+  _bad(asAddresses => 'name is not a string') if ref $name;
+  return (defined $name && $name ne '') ? _fmt_phrase($name) . " <$spec>" : $spec;
+}
+
+sub _fmt_addresses {
+  my $v = shift;
+  _bad(asAddresses => 'not a list') unless ref $v eq 'ARRAY';
+  return join(', ', map { _fmt_mailbox($_) } @$v);
+}
+
+sub _fmt_grouped {
+  my $v = shift;
+  _bad(asGroupedAddresses => 'not a list') unless ref $v eq 'ARRAY';
   my @out;
-  while (@groups) {
-    my ($group, $list) = splice(@groups, 0, 2);
-    my @mbox;
-    for my $addr (@$list) {
-      my $phrase = $addr->phrase;
-      my $spec;
-      if ($addr->is_valid) {
-        $spec = $addr->address;
-      }
-      elsif (defined $addr->user) {
-        $spec = $addr->user;
-        $spec .= '@' . $addr->host if defined $addr->host;
-      }
-      else {
-        # No angle-addr: a bare token such as "user1", which the parser
-        # reads as a phrase.  Keep it exactly as given.
-        $spec = $addr->original;
-        $phrase = undef;
-      }
-      $spec = Encode::encode('UTF-8', $spec) if $spec =~ /[^\x00-\x7f]/;
-      push @mbox, (defined $phrase && $phrase ne '')
-        ? _encode_phrase($phrase) . " <$spec>"
-        : $spec;
-    }
-    if (defined $group) {
-      push @out, _encode_phrase($group) . ': ' . join(', ', @mbox) . ';';
+  for my $g (@$v) {
+    _bad(asGroupedAddresses => 'not an EmailAddressGroup')
+      unless ref $g eq 'HASH' && ref $g->{addresses} eq 'ARRAY';
+    my @mbox = map { _fmt_mailbox($_) } @{ $g->{addresses} };
+    if (defined $g->{name}) {
+      _bad(asGroupedAddresses => 'name is not a string') if ref $g->{name};
+      push @out, _fmt_phrase($g->{name}) . ':' . (@mbox ? ' ' . join(', ', @mbox) : '') . ';';
     }
     else {
       push @out, @mbox;
     }
   }
-  # Written raw, so nothing in it may end the header line.
-  return join(', ', @out) =~ s/[\r\n]+/ /gr;
+  return join(', ', @out);
 }
 
-sub _mkemail {
-  my $a = shift;
-  return join(", ", map { _mkone($_) } @$a);
+sub _fmt_msgids {
+  my $v = shift;
+  _bad(asMessageIds => 'not a list') unless ref $v eq 'ARRAY';
+  return undef unless @$v;    # no msg-id at all reads back as null
+  for my $id (@$v) {
+    _bad(asMessageIds => 'not a string') if !defined $id || ref $id;
+    _bad(asMessageIds => "'$id' is not a msg-id") if $id eq '' || $id =~ /[\s<>\x00-\x1f\x7f]/;
+  }
+  return join(' ', map { "<$_>" } @$v);
+}
+
+# RFC 3339 (a JMAP Date) in, RFC 5322 S3.3 date-time out, keeping the
+# offset; asDate reads it back as the same instant and offset.
+sub _fmt_date {
+  my $v = shift;
+  _bad(asDate => 'not a string') if ref $v;
+  my ($y, $mo, $d, $h, $mi, $s, $tz) = $v =~
+    /\A(\d{4})-(\d\d)-(\d\d)[Tt](\d\d):(\d\d):(\d\d)(?:\.\d+)?([Zz]|[-+]\d\d:\d\d)\z/
+    or _bad(asDate => "'$v' is not an RFC 3339 date-time");
+  $tz = $tz =~ /^[Zz]$/ ? '+0000' : $tz =~ s/://r;
+  my $dt = eval {
+    DateTime->new(year => $y, month => $mo, day => $d, hour => $h,
+                  minute => $mi, second => $s, time_zone => $tz);
+  } or _bad(asDate => "'$v' is not a valid date-time");
+  return $dt->strftime('%a, %d %b %Y %H:%M:%S %z');
+}
+
+sub _fmt_urls {
+  my $v = shift;
+  _bad(asURLs => 'not a list') unless ref $v eq 'ARRAY';
+  return undef unless @$v;    # no URL at all reads back as null
+  for my $u (@$v) {
+    _bad(asURLs => 'not a string') if !defined $u || ref $u;
+    _bad(asURLs => "'$u' is not a URL") if $u eq '' || $u =~ /[\s<>\x00-\x1f\x7f]/;
+  }
+  return join(', ', map { "<$_>" } @$v);
+}
+
+# The header fields given by header:{name}[:as{form}][:all] properties
+# on an Email or EmailBodyPart, as [Name, [Raw values]] in a stable
+# order.  Dies on a property that is not valid for create.
+sub _header_props {
+  my $obj = shift;
+  my @res;
+  for my $key (sort grep { /^header:/ } keys %$obj) {
+    my ($name, $form, $all) = parse_header_property($key)
+      or die "Invalid header property '$key'\n";
+    die "$form is not allowed for header $name\n" unless header_form_allowed($name, $form);
+    my $val = $obj->{$key};
+    next unless defined $val;
+    my @vals;
+    if ($all) {
+      die "$key must be a list\n" unless ref $val eq 'ARRAY';
+      @vals = @$val;
+    }
+    elsif ($form eq 'asRaw' && ref $val eq 'ARRAY') {
+      @vals = @$val;    # a list of Raw values: one header field each
+    }
+    else {
+      @vals = ($val);
+    }
+    push @res, [ $name, [ grep { defined } map { format_header($form, $_) } @vals ] ];
+  }
+  return @res;
+}
+
+# Write a Raw value (format_header's output, or one given) as is: the
+# writer puts a space after the colon itself, so one leading space is
+# dropped, and the value is written as UTF-8 octets.
+sub _raw_for_write {
+  my $v = shift;
+  $v =~ s/\A //;
+  $v = Encode::encode('UTF-8', $v) if Encode::is_utf8($v);
+  return $v;
+}
+
+sub _set_raw_header {
+  my ($mime, $name, $vals) = @_;
+  $mime->header_raw_set($name => map { _raw_for_write($_) } @$vals);
 }
 
 sub _detect_encoding {
@@ -752,20 +938,6 @@ sub default_header_defaults {
   return undef;
 }
 
-sub _apply_headers {
-  my ($mime, $headers) = @_;
-  while (@$headers) {
-    my $name = shift @$headers;
-    my $val = shift @$headers;
-    next unless defined $val;
-    if (ref($val) eq 'ARRAY') {
-      _header_set($mime, $name => @$val);
-    } else {
-      _header_set($mime, $name => $val);
-    }
-  }
-}
-
 sub _build_bodystructure {
   my ($node, $bodyValues, $getblob) = @_;
 
@@ -831,17 +1003,11 @@ sub _build_bodystructure {
 
 sub _apply_bodystructure_headers {
   my ($mime, $node) = @_;
-  for my $key (keys %$node) {
-    next unless $key =~ /^header:(.+)/;
-    my $hname = $1;
-    my $hval = $node->{$key};
+  for my $h (_header_props($node)) {
+    my ($hname, $vals) = @$h;
     # Skip Content-* headers that are managed by Email::MIME
     next if $hname =~ /^Content-/i;
-    if (ref($hval) eq 'ARRAY') {
-      _header_set($mime, $hname => @$hval);
-    } else {
-      _header_set($mime, $hname => $hval) if defined $hval;
-    }
+    _set_raw_header($mime, $hname, $vals);
   }
 }
 
@@ -867,75 +1033,56 @@ sub _make {
   #   2. Convenience properties (only if header:* didn't set that header)
   #   3. Defaults (only if neither header:* nor convenience set the header)
 
-  # Step 1: Collect top-level header:* overrides into a lookup
-  my %header_override;  # lc(name) => 1
-  for my $key (keys %$args) {
-    next unless $key =~ /^header:(.+)/;
-    $header_override{lc $1} = 1;
-  }
-
-  my @header;
+  # Every header field is written through format_header, the inverse
+  # of the header forms parse() reads, as [Name, [Raw values]].
+  my @header = _header_props($args);
+  my %have = map { lc($_->[0]) => 1 } @header;
 
   # Step 2: Convenience properties (skip if header:* already provides it)
-  push @header, From => _mkemail($args->{from})
-    if $args->{from} && !$header_override{from};
-  push @header, To => _mkemail($args->{to})
-    if $args->{to} && !$header_override{to};
-  push @header, Cc => _mkemail($args->{cc})
-    if $args->{cc} && !$header_override{cc};
-  push @header, Bcc => _mkemail($args->{bcc})
-    if $args->{bcc} && !$header_override{bcc};
-  push @header, Subject => $args->{subject}
-    if defined($args->{subject}) && !$header_override{subject};
-  if (!$header_override{date}) {
-    if ($args->{sentAt}) {
-      push @header, Date => $args->{sentAt};
-    }
-    elsif ($args->{msgdate}) {
-      push @header, Date => Date::Format::time2str("%a, %d %b %Y %H:%M:%S %z", $args->{msgdate});
-    }
+  my @convenience = (
+    [ from       => From          => 'asAddresses' ],
+    [ to         => To            => 'asAddresses' ],
+    [ cc         => Cc            => 'asAddresses' ],
+    [ bcc        => Bcc           => 'asAddresses' ],
+    [ subject    => Subject       => 'asText' ],
+    [ sentAt     => Date          => 'asDate' ],
+    [ messageId  => 'Message-ID'  => 'asMessageIds' ],
+    [ inReplyTo  => 'In-Reply-To' => 'asMessageIds' ],
+    [ references => References    => 'asMessageIds' ],
+    [ replyTo    => 'Reply-To'    => 'asAddresses' ],
+    [ sender     => Sender        => 'asAddresses' ],
+  );
+  for my $c (@convenience) {
+    my ($prop, $name, $form) = @$c;
+    next if $have{lc $name};
+    my $val = format_header($form, $args->{$prop});
+    next unless defined $val;
+    push @header, [ $name, [ $val ] ];
+    $have{lc $name} = 1;
   }
-  if ($args->{messageId} && ref($args->{messageId}) eq 'ARRAY' && @{$args->{messageId}}
-      && !$header_override{'message-id'}) {
-    push @header, 'Message-ID' => join(' ', map { "<$_>" } @{$args->{messageId}});
+  if (!$have{date} && $args->{msgdate}) {
+    push @header, [ Date => [ Date::Format::time2str("%a, %d %b %Y %H:%M:%S %z", $args->{msgdate}) ] ];
+    $have{date} = 1;
   }
-  if ($args->{inReplyTo} && ref($args->{inReplyTo}) eq 'ARRAY' && @{$args->{inReplyTo}}
-      && !$header_override{'in-reply-to'}) {
-    push @header, 'In-Reply-To' => join(' ', map { "<$_>" } @{$args->{inReplyTo}});
-  }
-  if ($args->{references} && ref($args->{references}) eq 'ARRAY' && @{$args->{references}}
-      && !$header_override{references}) {
-    push @header, 'References' => join(' ', map { "<$_>" } @{$args->{references}});
-  }
-  push @header, 'Reply-To' => _mkemail($args->{replyTo})
-    if $args->{replyTo} && !$header_override{'reply-to'};
-  push @header, Sender => _mkemail($args->{sender})
-    if $args->{sender} && !$header_override{sender};
 
-  # Step 2b: Add all header:* values
-  for my $key (keys %$args) {
-    next unless $key =~ /^header:(.+)/;
-    push @header, $1 => $args->{$key};
-  }
+  # header:* on the textBody/htmlBody part go on the message, unless the
+  # message already has that field.
   for my $partlist ($args->{textBody}, $args->{htmlBody}) {
     next unless $partlist && ref($partlist) eq 'ARRAY';
     for my $part (@$partlist) {
-      for my $key (keys %$part) {
-        next unless $key =~ /^header:(.+)/;
-        my $hname = $1;
-        # Only add if not already set by top-level header:* or convenience
-        my %have_so_far = map { lc($header[$_]) => 1 } grep { $_ % 2 == 0 } 0..$#header;
-        push @header, $hname => $part->{$key} unless $have_so_far{lc $hname};
+      for my $h (_header_props($part)) {
+        next if $have{lc $h->[0]};
+        push @header, $h;
+        $have{lc $h->[0]} = 1;
       }
     }
   }
 
   # Step 3: Defaults via callback (only if nothing set them)
-  my %have = map { lc($header[$_]) => 1 } grep { $_ % 2 == 0 } 0..$#header;
   for my $name (qw(Date Message-ID)) {
     next if $have{lc $name};
     my $val = $defaults_cb->($name);
-    push @header, $name => $val if defined $val;
+    push @header, [ $name, [ $val ] ] if defined $val;
   }
 
   my $bodyValues = $args->{bodyValues} || {};
@@ -945,16 +1092,7 @@ sub _make {
     my $MIME = _build_bodystructure($args->{bodyStructure}, $bodyValues, $getblob);
 
     # Apply message-level headers to the top-level MIME part
-    while (@header) {
-      my $name = shift @header;
-      my $val = shift @header;
-      if (ref($val) eq 'ARRAY') {
-        # :all style - set multiple values
-        _header_set($MIME, $name => @$val);
-      } else {
-        _header_set($MIME, $name => $val) if defined $val;
-      }
-    }
+    _set_raw_header($MIME, @$_) for @header;
 
     my $res = $MIME->as_string();
     $res =~ s/\r?\n/\r\n/gs;
@@ -1095,22 +1233,22 @@ sub _make {
       attributes => { content_type => 'multipart/mixed' },
       parts => [$body, @attparts],
     );
-    _apply_headers($MIME, \@header);
+    _set_raw_header($MIME, @$_) for @header;
   }
   elsif ($textpart && $htmlpart) {
     $MIME = Email::MIME->create(
       attributes => { content_type => 'multipart/alternative' },
       parts => [$textpart, $htmlpart],
     );
-    _apply_headers($MIME, \@header);
+    _set_raw_header($MIME, @$_) for @header;
   }
   elsif ($textpart) {
     # Add message headers to the existing part (preserves Content-ID etc.)
-    _apply_headers($textpart, \@header);
+    _set_raw_header($textpart, @$_) for @header;
     $MIME = $textpart;
   }
   elsif ($htmlpart) {
-    _apply_headers($htmlpart, \@header);
+    _set_raw_header($htmlpart, @$_) for @header;
     $MIME = $htmlpart;
   }
   else {
@@ -1118,7 +1256,7 @@ sub _make {
       attributes => { content_type => 'text/plain', charset => 'us-ascii' },
       body => '',
     );
-    _apply_headers($MIME, \@header);
+    _set_raw_header($MIME, @$_) for @header;
   }
 
   my $res = $MIME->as_string();
@@ -1175,6 +1313,109 @@ __END__
 =head1 NAME
 
 Data::JSEmail - Convert between Email::MIME and the JSON format from RFC 8621 (JMAP Mail)
+
+=head1 HEADER FORMS
+
+One codec for the parsed header forms of RFC 8621 S4.1.2, used in both
+directions: C<parse> and C<make> use it for every header field they read
+or write, the convenience properties (C<from>, C<subject>, C<sentAt>,
+...) included.  A form is named as in a property: C<asText>,
+C<asAddresses>, C<asGroupedAddresses>, C<asMessageIds>, C<asDate>,
+C<asURLs>, and C<asRaw> for Raw (C<undef>, C<''> and C<'Raw'> mean
+C<asRaw> too).
+
+=head2 header_value($form, $raw_values, all => 0|1)
+
+The value of a C<header:Name:$form[:all]> property, from the Raw value of
+each instance of the field in message order (an arrayref; a single
+string is taken as a one-item list; C<undef> items are skipped).
+Without C<all>, the parsed value of the last instance, or C<undef> if
+there is none; with C<all =E<gt> 1>, an arrayref of the parsed value of
+each instance (C<[]> if none).  Dies (C<"Unknown header form '...'\n">)
+for a form it does not know.
+
+=head2 header_property($headers, $property)
+
+C<header_value> over an EmailHeader list (C<[{name, value}, ...]>, the
+C<headers> property C<parse> returns) for a whole property name such as
+C<header:Resent-To:asAddresses:all>; names match case-insensitively.
+Dies (C<"Invalid header property '...'\n">) when C<parse_header_property>
+rejects the name.
+
+=head2 parse_header_property($property)
+
+C<($name, $form, $all)> for a valid C<header:{name}[:as{form}][:all]>
+property (C<$form> is C<asRaw> when none is given, C<$all> is 0 or 1),
+or the empty list if the name is not a header property, the field name
+is not printable ASCII without a colon (S4.1.3), or the form is unknown.
+It does not consult C<header_form_allowed>.
+
+=head2 format_header($form, $value)
+
+The create side, the inverse of C<header_value> for one instance: the
+Raw value (with the usual leading space) to write for C<$value> in
+C<$form>, such that C<header_value($form, [$raw])> gives C<$value> back.
+The result is a character string; C<make> writes it as UTF-8.
+
+=over 4
+
+=item asText: RFC 2047 encoded-words (UTF-8, Q) when the text is not
+printable ASCII or holds something that looks like an encoded-word
+(C<=?>); line breaks become spaces.
+
+=item asAddresses: C<name E<lt>emailE<gt>> or a bare C<email>, comma
+separated.  A name is written as atoms, as a quoted-string (C<"> and
+C<\> escaped), or as encoded-words if it is not ASCII or contains
+C<=?>.  A local part that is not a dot-atom is quoted.  An C<email>
+without an C<@> is written as given (S4.1.2.3 allows it, and S4.6 lets a
+draft be invalid); RFC 6532 UTF-8 addresses are kept.  C<[]> gives an
+empty value.
+
+=item asGroupedAddresses: as asAddresses, with each group that has a
+name written as C<Name: mailbox, ...;> (C<Name:;> when empty) and the
+mailboxes of a group with a null name written ungrouped.
+
+=item asMessageIds: C<E<lt>idE<gt>> separated by spaces; C<[]> gives
+C<undef> (no field: an empty one would read back as null, not []).
+
+=item asDate: an RFC 3339 date-time (a JMAP Date) written as an RFC 5322
+date-time, keeping the offset: C<2026-11-07T10:00:00+11:00> becomes
+C<Sat, 07 Nov 2026 10:00:00 +1100>; C<Z> becomes C<+0000>.
+
+=item asURLs: C<E<lt>urlE<gt>> separated by commas; C<[]> gives
+C<undef>.
+
+=item asRaw: the value as given.
+
+=back
+
+A C<$value> of C<undef> gives C<undef> (no header field).  A value of
+the wrong type or shape dies with C<"Invalid $form header value: ...\n">:
+for example a Date that is not RFC 3339 or not a real date, a message
+id or URL that is empty or holds whitespace or angle brackets, an
+EmailAddress without a string C<email>, a domain with spaces or
+specials, a Raw value with NUL or with a line break that is not a fold
+(CRLF then whitespace).  An unknown form dies like C<header_value>.
+
+=head2 header_form_allowed($field, $form)
+
+1 if the parsed form may be used with that header field (the table in
+RFC 8621 S4.1.2: Raw is allowed for every field; a field defined in RFC
+5322 or RFC 2369 only with the forms listed for it; any other field with
+every form), else 0.  An unknown form is 0.
+
+=head2 Header properties in make
+
+C<make> takes C<header:{name}[:as{form}][:all]> properties on the Email
+and on any EmailBodyPart directly: each is checked with
+C<parse_header_property> and C<header_form_allowed> and written with
+C<format_header>; C<:all> takes a list and writes one field per item, and
+a Raw value given as a list does the same.  A Raw value is written as
+given, less one leading space (the writer puts one after the colon).
+C<make> dies on an invalid property name, a form not allowed for the
+field, a value C<format_header> refuses, or an C<:all> value that is not a
+list.  A C<header:*> property wins over the convenience property for the
+same field.
 
 =head1 AUTHOR
 

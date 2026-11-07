@@ -223,12 +223,10 @@ my $tricky = Data::JSEmail::parse(join("\r\n",
   '', 'body', ''));
 is(prop_value($tricky->{headers}, 'header:Subject:asText'), '=?UTF-8?Q?x?=', 'header:Subject:asText decodes once');
 {
-  local $TODO = 'from_mime_string has already decoded the phrase when asText decodes it again (lib lines 289, 323)';
   is_deeply(prop_value($tricky->{headers}, 'header:Cc:asAddresses'),
     [ { name => q{=?UTF-8?Q?A?=}, email => q{a@example.com} } ], q{header:Cc:asAddresses decodes the name once});
 }
 {
-  local $TODO = 'subject/addresses are parsed from Email::MIME header(), which has already decoded them (lib lines 60-66)';
   is($tricky->{subject}, '=?UTF-8?Q?x?=', 'subject is decoded once');
   is_deeply($tricky->{cc}, [ { name => '=?UTF-8?Q?A?=', email => 'a@example.com' } ], 'cc name is decoded once');
 }
