@@ -30,16 +30,38 @@ use Sys::Hostname;
 
 my $json = JSON::XS->new->utf8->canonical();
 
-sub parse {
+# The Email::MIME settings this module is written against.  They are
+# package globals, so a caller may have set them either way for its own
+# reasons; every entry point runs with these values instead, so what this
+# module returns does not depend on who calls it.
+#   STRICT_PARAMS = 0: accept the unquoted and otherwise sloppy
+#     Content-Type/Content-Disposition parameters real mail is full of
+#     (strict mode drops them, or the whole header, with a warning).
+#   PRE_2231_FORM = 1: write a plain name=/filename= next to an RFC 2231
+#     one, for readers that do not know RFC 2231.
+#   GROUCHY = 0: do not die on a message without a header/body separator.
+sub _with_settings {
+  my $code = shift;
+  local $Email::MIME::ContentType::STRICT_PARAMS = 0;
+  local $Email::MIME::ContentType::PRE_2231_FORM = 1;
+  local $Email::Simple::GROUCHY = 0;
+  return $code->(@_);
+}
+
+sub parse { _with_settings(\&_parse, @_) }
+
+sub _parse {
   my $rfc822 = shift;
   my $id = shift || Digest::SHA::sha256_hex($rfc822);
   my $eml = Email::MIME->new($rfc822);
-  my $res = parse_email($id, $eml);
+  my $res = _parse_email($id, $eml);
   $res->{size} = length($rfc822);
   return $res;
 }
 
-sub parse_email {
+sub parse_email { _with_settings(\&_parse_email, @_) }
+
+sub _parse_email {
   my $id = shift;
   my $eml = shift;
   my $part = shift;
@@ -793,7 +815,9 @@ sub _apply_bodystructure_headers {
   }
 }
 
-sub make {
+sub make { _with_settings(\&_make, @_) }
+
+sub _make {
   my $args = shift;
   my $getblob = shift;
   my $defaults_cb = shift || \&default_header_defaults;

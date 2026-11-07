@@ -1,5 +1,11 @@
 Revision history for Perl extension Data::JSEmail
 
+0.06  unreleased
+	- run every entry point (parse, parse_email, make) with the
+	  Email::MIME globals the module is written against (STRICT_PARAMS
+	  0, PRE_2231_FORM 1, GROUCHY 0) localised, so results no longer
+	  depend on what the caller set; add t/globals.t
+
 0.05  2026-11-07
 	- flag an unknown Content-Transfer-Encoding as an encoding problem
 	  (RFC 8621 S4.1.4): it came back undecoded and unflagged

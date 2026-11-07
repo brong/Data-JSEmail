@@ -5,14 +5,16 @@ package JSEmailTest;
 # The proxy that uses this module (jmap-perl, JMAP/DB.pm) sets
 # $Email::MIME::ContentType::STRICT_PARAMS = 0 for the whole process, so
 # Email::MIME accepts the unquoted and otherwise sloppy parameters real
-# mail is full of.  The tests run the same way, so they see what
-# production sees.
+# mail is full of.  Data::JSEmail localises that setting itself, so the
+# result must not depend on it: the tests run the proxy's way by default
+# and in strict mode with JSEMAIL_STRICT_PARAMS=1 (t/globals.t checks
+# both in one process).
 
 use strict;
 use warnings;
 
 use Email::MIME::ContentType;
-BEGIN { $Email::MIME::ContentType::STRICT_PARAMS = 0 }
+BEGIN { $Email::MIME::ContentType::STRICT_PARAMS = $ENV{JSEMAIL_STRICT_PARAMS} // 0 }
 
 use Data::JSEmail;
 use Exporter 'import';
