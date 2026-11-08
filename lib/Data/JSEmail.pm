@@ -230,7 +230,7 @@ sub asDate {
   return undef unless defined $val;
   $val =~ s/\(.*//;  # strip comments
   $val =~ s/^\s+//;  # strip leading whitespace
-  $val =~ s/\s+$//;  # strip trailing whitespace
+  $val =~ s/\s+\z//;  # strip trailing whitespace
   # Add :00 seconds if missing (e.g. "23:32 -0330" → "23:32:00 -0330")
   $val =~ s/(\s\d{2}:\d{2})\s+([-+]\d{4})/$1:00 $2/;
   my $dt = eval { DateTime::Format::Mail->parse_datetime($val) };
@@ -254,7 +254,7 @@ sub asCommaList {
   my $val = shift;
   return undef unless defined $val;
   $val =~ s/^\s+//;
-  $val =~ s/\s+$//;
+  $val =~ s/\s+\z//;
   my @list = split /\s*,\s*/, $val;
   return \@list;
 }
@@ -263,7 +263,7 @@ sub asURLs {
   my $val = shift;
   return undef unless defined $val;
   $val =~ s/^\s+//;
-  $val =~ s/\s+$//;
+  $val =~ s/\s+\z//;
   return undef unless length($val);
 
   # Extract URLs from angle brackets
@@ -297,7 +297,9 @@ sub asText {
   }
   my $res = NFC($decoded);
   $res =~ s/^\s*//;
-  $res =~ s/\s*$//;
+  # \s+\z, not \s*$: the regex engine tried every position of a long run
+  # of spaces inside the value, so "a<80000 spaces>b" took seconds
+  $res =~ s/\s+\z//;
   return $res;
 }
 
@@ -928,6 +930,11 @@ sub _leaf_part {
   my %attrs = (content_type => $type, encoding => _cte($octets, $type));
   $attrs{charset} = $charset if $is_text && defined $charset;
   my $disp = $node->{disposition} || $opt{disposition};
+  # these go into part headers as they are: a lone CR (which Email::MIME
+  # lets through) or any control character would start a header of the
+  # client's choosing in a parser that ends lines on CR
+  die "Invalid disposition\n" if defined $disp && ($disp !~ /\A[A-Za-z0-9!#\$&^_.+-]{1,64}\z/);
+  die "Invalid type\n" if $type =~ /[\x00-\x1f\x7f]/;
   $attrs{disposition} = $disp if $disp;
   $attrs{filename} = $attrs{name} = $node->{name} if $node->{name};
 
@@ -938,6 +945,8 @@ sub _leaf_part {
     $mime->header_str_set('Content-ID' => "<$node->{cid}>");
   }
   if ($node->{language} && ref($node->{language}) eq 'ARRAY') {
+    # each a language tag (RFC 5646): letters, digits and hyphens
+    die "Invalid language\n" if grep { ref || !defined || !/\A[A-Za-z0-9]{1,8}(?:-[A-Za-z0-9]{1,8})*\z/ } @{$node->{language}};
     $mime->header_str_set('Content-Language' => join(', ', @{$node->{language}}));
   }
   _apply_bodystructure_headers($mime, $node) if $opt{headers} // 1;
