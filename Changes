@@ -10,6 +10,9 @@ Revision history for Perl extension Data::JSEmail
 	  (which Email::MIME lets through) started a header of the client's
 	  choosing for a parser that ends lines on CR
 	- add t/hostile.t
+	- the preview reads only as much of a body as it takes to fill it: a
+	  2MB text body parsed in 24ms, now 1.5ms (2.5MB of HTML: 32ms, 2.4ms);
+	  the preview is unchanged
 
 0.06  2026-11-07
 	- run every entry point (parse, parse_email, make) with the

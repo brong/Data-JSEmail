@@ -463,7 +463,7 @@ sub preview {
   }
   if ($type =~ m{text/html}i) {
     my $text = _clean($type, _body_str($eml));
-    return make_preview(htmltotext($text));
+    return make_preview(_html_preview_text($text));
   }
   foreach my $sub ($eml->subparts()) {
     my $res = eval { preview($sub) };
@@ -472,10 +472,44 @@ sub preview {
   return undef;
 }
 
+# The first 256 characters of $text with each run of whitespace made one
+# space.  Collapsing a prefix of the text gives a prefix of the collapsed
+# whole (a run cut short still becomes one space), so only as much of a
+# long body is looked at as it takes to fill the preview: collapsing all of
+# a megabyte body to keep 256 characters was most of what parsing it cost.
 sub make_preview {
-  my $text = shift;
-  $text =~ s/\s+/ /gs;
-  return substr($text, 0, 256);
+  my $text = shift // '';
+  my $len = 1024;
+  while (1) {
+    my $part = length($text) > $len ? substr($text, 0, $len) : $text;
+    (my $c = $part) =~ s/\s+/ /gs;
+    return substr($c, 0, 256) if length($c) >= 256 || length($part) == length($text);
+    $len *= 4;
+  }
+}
+
+# The text of an HTML body, as htmltotext gives it, but only enough of it
+# for a preview: HTML::Strip keeps its state between calls, so it is fed
+# pieces ending just after a '>' (never inside a tag or an entity) until
+# 256 characters of text have come out.
+sub _html_preview_text {
+  my $html = shift // '';
+  my $hs = HTML::Strip->new();
+  my ($out, $pos, $chunk) = ('', 0, 8192);
+  while ($pos < length $html) {
+    my $end = $pos + $chunk;
+    if ($end < length $html) {
+      my $gt = rindex($html, '>', $end);
+      $end = $gt + 1 if $gt >= $pos;
+    }
+    $out .= $hs->parse(substr($html, $pos, $end - $pos));
+    $pos = $end;
+    (my $c = $out) =~ s/\s+/ /gs;
+    return $out if length($c) > 256 && $pos < length $html;
+    $chunk *= 2;
+  }
+  $out .= $hs->eof // '';
+  return $out;
 }
 
 sub hasatt {
