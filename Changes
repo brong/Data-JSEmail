@@ -1,6 +1,6 @@
 Revision history for Perl extension Data::JSEmail
 
-0.07  unreleased
+0.07  2026-11-10
 	- security: trailing whitespace is stripped with \s+\z, not \s*$, which
 	  backtracked over every position of a long run of spaces inside a
 	  header value: a 320KB Subject took 23s to parse, now 10ms

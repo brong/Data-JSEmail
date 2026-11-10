@@ -5,7 +5,7 @@ use warnings;
 
 package Data::JSEmail;
 
-our $VERSION = '0.06';
+our $VERSION = '0.07';
 
 use JSON;
 use JSON::XS;
